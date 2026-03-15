@@ -1,0 +1,38 @@
+{
+  "name": "pre-mortem-discussion",
+  "version": "0.1.0",
+  "description": "Scaffold the Claude Code pre-mortem discussion skill into a project",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "bin": {
+    "pre-mortem-discussion": "dist/cli.js"
+  },
+  "files": [
+    "dist/**",
+    "assets/**"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "dev": "npm run build && node --enable-source-maps dist/cli.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "scaffold",
+    "skill",
+    "pre-mortem"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^2.0.0"
+  }
+}
