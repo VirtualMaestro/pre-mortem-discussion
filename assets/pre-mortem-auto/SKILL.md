@@ -1,6 +1,6 @@
-# /pre-mortem — Multi-Agent Pre-Mortem (Manual Mode, Spec v5.0)
+# /pre-mortem-auto — Multi-Agent Pre-Mortem (Automatic Mode, Spec v5.0)
 
-This skill orchestrates a structured multi-agent pre-mortem with explicit user gates and approval loops.
+This skill orchestrates a structured multi-agent pre-mortem with minimal user interruption.
 Scaffolded by `npx pre-mortem-discussion`.
 
 ## Non-goals
@@ -33,7 +33,8 @@ The orchestrator has TWO distinct modes:
 
 **Mode B: Chief Architect** (post-debate)
 - Forms positions and makes decisions
-- Resolves all open risks and contradictions
+- Resolves all open risks and contradictions autonomously
+- Only escalates truly blocking items (require external knowledge)
 - Produces final artifact
 
 Transition happens after all debate rounds complete. Print separator:
@@ -45,7 +46,7 @@ Transition happens after all debate rounds complete. Print separator:
 
 ## File layout (normative)
 Skill assets live under:
-- `.claude/skills/pre-mortem/*`
+- `.claude/skills/pre-mortem-auto/*`
 
 Session artifacts live under:
 - `discussions/{session_id}/*` including `state.json`, `round*.md`, `round*.json`, and `round2.jsonl`.
@@ -60,17 +61,30 @@ Use slugified topic names instead of timestamps:
 
 Store `session_id` in `state.json` matching folder name.
 
-## Human gates (MUST use AskUserQuestion)
-No round begins without explicit user approval.
-- Gate 0: critic/domain selection (before Round 1)
-- Gate 1: after Round 1 synthesis
-- Gate 2: after Round 2 synthesis
-- Gate 3: after Round 3 synthesis
-- Gate 4 (conditional): consensus check — offer 2 more rounds if not reached
-- Gate 5: architect decision approval (iterate until approved)
+## Human gates (minimal)
+This is the **automatic mode** — minimize user interruption.
 
-## Deterministic domain selection (Gate 0)
-1) Read `.claude/skills/pre-mortem/domains.md`.
+**No gates during debate:**
+- No Gate 0 (domain selection is automatic)
+- No gates between rounds (runs automatically)
+- No consensus check gate (automatic early stop)
+
+**Only escalate when truly blocked:**
+- Architect mode: only ask user for decisions requiring external knowledge
+- Examples of escalation-worthy items:
+  - "Which third-party auth provider should we use?" (business decision)
+  - "What is the budget for infrastructure?" (external constraint)
+  - "Does the team have Kubernetes expertise?" (team capability)
+- Examples of NON-escalation items (architect decides):
+  - "Should we use JWT or sessions?" (technical decision)
+  - "How should we handle rate limiting?" (technical decision)
+  - "What caching strategy?" (technical decision)
+
+**Final gate:**
+- Cleanup offer: "Delete discussions/{session_id}/ folder?"
+
+## Automatic domain selection
+1) Read `.claude/skills/pre-mortem-auto/domains.md`.
 2) Score each domain by trigger hits in the user spec.
    - Tokens: exact token match after tokenization (preferred)
    - Phrases: exact phrase match
@@ -79,7 +93,16 @@ No round begins without explicit user approval.
 3) Keep domains with score >= 2 OR explicitly requested by the user.
 4) Always include `tech-critic` for technical specs.
 5) Cap at 5 (highest scores).
-6) Ask user to approve/modify the list (Gate 0). Do not proceed without approval.
+6) **Print selected experts with signal counts** (no user approval required):
+   ```
+   Selected experts (auto):
+   - security-critic (8 signals)
+   - tech-critic (12 signals)
+   - scalability-critic (5 signals)
+   - ux-critic (3 signals)
+   - cost-critic (4 signals)
+   ```
+7) Store approved domains in `state.json.selected_domains` and proceed.
 
 ## Agent execution model
 - Do NOT route via named `subagent_type` (file-based discovery unreliable). Always use `subagent_type: "general-purpose"`.
@@ -136,7 +159,7 @@ Canonical contradiction object schema (used everywhere):
 - Required fields present
 - Severity in `{High, Med, Low}`
 - File naming + state transitions
-- Prompt drift check + user gate
+- Prompt drift check (auto-resolve: use updated prompt)
 
 Best-effort only (do not fail run): narrative phrasing pattern, perfect schema conformance beyond strict checks.
 
@@ -149,14 +172,13 @@ If a critic returns unparseable JSON:
 
 Round 2 persistence (robust): append each critic response as a line to `round2.jsonl`; at end compile to `round2.json` array.
 
-## Prompt canonicalization + drift handling (STRICT)
+## Prompt canonicalization + drift handling (automatic)
 - Agent prompts live in `.claude/agents/{name}.md` and are treated as canonical.
 - Store `sha256(normalized_body_after_yaml)` per agent in `state.json.agent_prompt_sha256`.
 - If current hash != stored hash:
-  - set `state.status = "prompt_drift_detected"`
-  - AskUserQuestion:
-    - Use updated prompt (store new hash; continue), OR
-    - Keep prior prompt for reproducibility (abort unless prior body is available in logs)
+  - Automatically use updated prompt (store new hash; continue)
+  - Log the drift in `state.json.prompt_drift_log`
+  - No user gate required (automatic mode)
 
 ## Consensus criterion (formal definition)
 Consensus is reached when ALL of the following are true:
@@ -166,21 +188,22 @@ Consensus is reached when ALL of the following are true:
 
 Evaluate programmatically from state.json after each round (not LLM judgment).
 
-## Execution flow (Manual Mode)
+## Execution flow (Automatic Mode)
 
 ### Step 1: Parse input and create session
-- User runs: `/pre-mortem <topic or file path>`
+- User runs: `/pre-mortem-auto <topic or file path>`
 - If file path: read file content as spec
 - If topic: use topic text as spec
 - Generate slugified session_id from spec
 - Create `discussions/{session_id}/` directory
 - Initialize `state.json` with session_id
 
-### Step 2: Domain selection (Gate 0)
-- Score domains from `.claude/skills/pre-mortem/domains.md`
-- Present scored list to user via AskUserQuestion
-- User approves or modifies expert panel
-- Store approved domains in `state.json.selected_domains`
+### Step 2: Automatic domain selection
+- Score domains from `.claude/skills/pre-mortem-auto/domains.md`
+- Auto-select top 5 domains (score >= 2)
+- Print selected experts with signal counts (no user approval)
+- Store in `state.json.selected_domains`
+- Proceed immediately
 
 ### Step 3: Generate agent files
 For each domain in `selected_domains`:
@@ -189,7 +212,7 @@ For each domain in `selected_domains`:
    - Print: `✓ .claude/agents/{domain}-critic.md already exists, skipping`
    - Continue to next domain
 3. If not exists:
-   - Read `.claude/skills/pre-mortem/agent-template.md`
+   - Read `.claude/skills/pre-mortem-auto/agent-template.md`
    - Generate full agent file with frontmatter:
      ```yaml
      ---
@@ -207,59 +230,56 @@ For each domain in `selected_domains`:
 
 **Important:** This step ensures agent prompts are persisted for reuse and manual refinement. The orchestrator can still function if writes fail (inline prompt fallback).
 
-### Step 4: Run Round 1 (parallel discovery)
+### Step 4: Run rounds automatically (up to 5)
+Run rounds in sequence until consensus reached OR 5 rounds completed:
+
+**Round 1: Parallel discovery**
 - Launch all critics in parallel
 - Each critic identifies risks independently
 - Collect JSON outputs
 - Validate and write `round1.json` and `round1.md`
 - Update `state.json`
+- Check consensus → if reached, go to Step 5; else continue
 
-### Step 5: Gate 1 (after Round 1)
-- Synthesize Round 1 findings
-- AskUserQuestion: "Proceed to Round 2?"
-- If no: abort
-- If yes: continue
-
-### Step 6: Run Round 2 (sequential debate)
+**Round 2: Sequential debate**
 - Critics run sequentially, each sees prior outputs
 - Focus on contradictions and refinement
 - Append to `round2.jsonl` as each completes
 - Compile to `round2.json` at end
 - Write `round2.md`
 - Update `state.json`
+- Check consensus → if reached, go to Step 5; else continue
 
-### Step 7: Gate 2 (after Round 2)
-- Synthesize Round 2 findings
-- AskUserQuestion: "Proceed to Round 3?"
-- If no: abort
-- If yes: continue
-
-### Step 8: Run Round 3 (parallel filter)
+**Round 3: Parallel filter**
 - Critics run in parallel
 - Focus on High/Med risks only
 - Validate solutions and tradeoffs
 - Write `round3.json` and `round3.md`
 - Update `state.json`
+- Check consensus → if reached, go to Step 5; else continue
 
-### Step 9: Gate 3 (after Round 3)
-- Synthesize Round 3 findings
-- AskUserQuestion: "Proceed to consensus check?"
-- If no: abort
-- If yes: continue
+**Round 4: Parallel filter**
+- Same semantics as Round 3
+- Write `round4.json` and `round4.md`
+- Update `state.json`
+- Check consensus → if reached, go to Step 5; else continue
 
-### Step 10: Consensus check (Gate 4)
-- Evaluate consensus criterion programmatically:
-  - Count High open risks
-  - Check blocking_question resolution
-  - Check contradiction status
-- If consensus reached: go to Step 10
-- If NOT reached:
-  - Count unresolved items (N)
-  - AskUserQuestion: "Consensus not reached on N issues. Run 2 more rounds?"
-  - If yes: run Round 4 and Round 5 (parallel filter semantics), then go to Step 10
-  - If no: go to Step 10
+**Round 5: Parallel filter (final)**
+- Same semantics as Round 3
+- Write `round5.json` and `round5.md`
+- Update `state.json`
+- Proceed to Step 5 regardless of consensus
 
-### Step 11: Switch to Architect Mode
+### Step 5: Write debate summary
+- Write `debate-summary.md` to session folder
+- Include:
+  - Total rounds run
+  - Consensus status
+  - Risk counts by severity
+  - Key contradictions
+  - Unresolved items
+
+### Step 6: Switch to Architect Mode
 - Print separator:
   ```
   ─────────────────────────────────────────
@@ -268,28 +288,36 @@ For each domain in `selected_domains`:
   ```
 - Orchestrator now operates as Chief Architect
 
-### Step 12: Architect proposes decisions
-- For each High/Med unresolved risk, propose:
-  - Decision: ACCEPT RISK | MITIGATE | REJECT FEATURE | DEFER | ESCALATE
-  - Reasoning: one sentence
-- For each unresolved contradiction, propose resolution
-- Present all proposals to user
+### Step 7: Architect resolves all open items autonomously
+For each High/Med unresolved risk:
+- Decide: ACCEPT RISK | MITIGATE | REJECT FEATURE | DEFER | ESCALATE
+- If decision requires external knowledge → escalate to user via AskUserQuestion
+- Otherwise → decide autonomously and log reasoning
 
-### Step 13: Gate 5 (architect approval)
-- User reviews architect proposals
-- AskUserQuestion: "Approve these decisions?"
-- If no: iterate on proposals (user provides feedback, architect revises)
-- If yes: continue
+For each unresolved contradiction:
+- Resolve autonomously based on technical merit
+- Log resolution reasoning
 
-### Step 14: Print architect decisions
-- For each High/Med decision, print:
-  ```
-  [ARCHITECT] {severity} · {risk_id} · {risk_name}
-    Decision : {ACCEPT RISK | MITIGATE | REJECT FEATURE | DEFER | ESCALATE}
-    Reasoning: {one sentence}
-  ```
+**Escalation criteria (ask user):**
+- Requires business decision (budget, priorities, vendor choice)
+- Requires external constraint knowledge (team skills, timeline, compliance)
+- Requires stakeholder input (user preferences, product direction)
 
-### Step 15: Generate output artifact
+**Non-escalation (decide autonomously):**
+- Technical architecture decisions
+- Implementation approach choices
+- Technology stack selections (within reasonable defaults)
+- Performance/security tradeoffs (favor security by default)
+
+### Step 8: Print architect decisions
+For each High/Med decision, print:
+```
+[ARCHITECT] {severity} · {risk_id} · {risk_name}
+  Decision : {ACCEPT RISK | MITIGATE | REJECT FEATURE | DEFER | ESCALATE}
+  Reasoning: {one sentence}
+```
+
+### Step 9: Generate output artifact
 - Detect appropriate file type (see Genre-matching section)
 - Write artifact to project root or next to input file
 - Include:
@@ -298,7 +326,7 @@ For each domain in `selected_domains`:
   - `## Known Issues` section (deferred/accepted risks)
   - `## Debate Summary` section (brief stats + session folder link)
 
-### Step 16: Cleanup offer
+### Step 10: Cleanup offer
 - AskUserQuestion: "Delete discussions/{session_id}/ folder?"
 - If yes: delete folder
 - If no: keep folder
@@ -317,15 +345,11 @@ For each domain in `selected_domains`:
 - Goal: challenge assumptions, identify contradictions
 - Output: refined risks + contradiction list
 
-### Round 3: Parallel filter
+### Round 3-5: Parallel filter
 - All critics run simultaneously
 - Focus ONLY on High/Med severity risks
 - Goal: validate solutions, assess tradeoffs
 - Output: actionable risk mitigation strategies
-
-### Round 4-5 (if needed): Parallel filter
-- Same semantics as Round 3
-- Only run if consensus not reached after Round 3
 
 ## Output artifact genre-matching
 
@@ -369,7 +393,7 @@ Example debate summary:
 ```markdown
 ## Debate Summary
 
-Pre-mortem completed: 3 rounds, 5 experts, 47 risks identified.
+Pre-mortem completed: 3 rounds (consensus reached early), 5 experts, 47 risks identified.
 - High severity: 2 (all resolved)
 - Med severity: 8 (6 mitigated, 2 accepted)
 - Low severity: 37 (documented)
@@ -377,5 +401,10 @@ Pre-mortem completed: 3 rounds, 5 experts, 47 risks identified.
 Full debate transcript: `discussions/oauth-jwt-mobile-app-3847/`
 ```
 
-## Extra rounds
-Default: extra rounds (4-5) are **parallel filter** rounds (Round 3 semantics) unless user explicitly requests sequential.
+## Automatic consensus checking
+After each round (1-5), evaluate consensus criterion:
+- If consensus reached: print "Consensus reached after round N" and proceed to architect mode
+- If not reached and rounds remain: continue to next round
+- If not reached and at round 5: proceed to architect mode anyway
+
+No user gate required — fully automatic.

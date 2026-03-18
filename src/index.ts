@@ -20,9 +20,10 @@ export type ScaffoldResult = {
   hadConflicts: boolean;
 };
 
-export async function scaffoldPreMortemSkill(opts: { cwd: string }): Promise<ScaffoldResult> {
+export async function scaffoldPreMortemSkill(opts: { cwd: string; skillName: string }): Promise<ScaffoldResult> {
   const cwd = opts.cwd;
-  const targetDir = skillTargetDir(cwd);
+  const skillName = opts.skillName;
+  const targetDir = skillTargetDir(cwd, skillName);
   await ensureDir(targetDir);
 
   const metaPath = path.join(targetDir, ".scaffold-meta.json");
@@ -31,8 +32,8 @@ export async function scaffoldPreMortemSkill(opts: { cwd: string }): Promise<Sca
   const entries: ScaffoldEntry[] = [];
   let hadConflicts = false;
 
-  for (const t of listSkillAssetTemplates()) {
-    const relativePath = path.join(".claude", "skills", "pre-mortem", t.fileName).replace(/\\/g, "/");
+  for (const t of listSkillAssetTemplates(skillName)) {
+    const relativePath = path.join(".claude", "skills", skillName, t.fileName).replace(/\\/g, "/");
     const dstPath = path.join(targetDir, t.fileName);
 
     const desired = t.content;
