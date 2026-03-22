@@ -34,10 +34,14 @@ Skill assets live under:
 
 Session artifacts live under:
 - `discussions/{session_id}/*` including:
+  - `debates/` (subfolder for all raw JSON data)
+    - `{agent}-round{N}.json` (per-critic output, written by critic)
+    - `round{N}.json` (compiled array, written by orchestrator)
+    - `round{N}.jsonl` (incremental log, written by orchestrator)
   - `state.json` (execution state, risk register, current step)
   - `input.md` (original spec)
-  - `round*.md`, `round*.json`, `round*.jsonl` (round outputs)
-  - `DEBATE_SUMMARY.md` (raw debate outcome, written after rounds)
+  - `round{N}.md` (human-readable round logs)
+  - `debate-summary.md` (raw debate outcome, written after rounds)
 
 ## Session folder naming
 Use slugified topic names instead of timestamps:
@@ -204,7 +208,7 @@ If a single risk object is missing required fields (`id`, `name`, `severity`, `d
 
 Rationale: `severity` is a core routing field — invalid severity would silently miscategorize the risk. `confidence` is supplementary signal — defaulting to `Med` is safe.
 
-Round 2 persistence (robust): append each critic response as a line to `round2.jsonl`; at end compile to `round2.json` array.
+Round 2 persistence (robust): append each critic response as a line to `debates/round2.jsonl`; at end compile to `debates/round2.json` array.
 
 ## Prompt canonicalization + drift handling (STRICT)
 - Agent prompts live in `.claude/agents/{name}.md` and are treated as canonical.
@@ -263,7 +267,7 @@ The `state.json` file is the single source of truth for session state. It must i
 - `"round_3_in_progress"` — Round 3 executing
 - `"extra_rounds_in_progress"` — Extra rounds executing
 - `"post_round3_consensus_check"` — Evaluating consensus
-- `"debate_summary_write"` — Writing DEBATE_SUMMARY.md
+- `"debate_summary_write"` — Writing debate-summary.md
 - `"architect_mode_active"` — Architect analyzing debate
 - `"human_architect_dialogue"` — Open conversation with user
 - `"final_artifact_write"` — Writing final solution file
@@ -309,10 +313,11 @@ If a session crashes (context overflow, network issue, etc.), resume with:
 
 | File/operation | Rule |
 |----------------|------|
-| `roundN.jsonl` | Append only; never overwrite |
-| `roundN.json` | Recompile from `.jsonl`; safe to overwrite |
-| `roundN.md` | Recompile from `.json`; safe to overwrite |
-| `DEBATE_SUMMARY.md` | Skip if exists; log "already exists, skipping" |
+| debates/roundN.jsonl | Append only; never overwrite |
+| debates/roundN.json | Recompile from `.jsonl`; safe to overwrite |
+| debates/{agent}-roundN.json | Written by critic; never overwrite |
+| roundN.md | Recompile from debates/roundN.json; safe to overwrite |
+| debate-summary.md | Skip if exists; log "already exists, skipping" |
 | Final artifact | Ask user before overwriting |
 | `state.json` | Always writable; never skip |
 
@@ -335,9 +340,9 @@ Never make decisions based on what the orchestrator "remembers". Read state.json
 
 **Rule D — Architect mode always reloads from disk:**
 When switching to Architect Mode, explicitly read:
-- `discussions/{session_id}/input.md` (original spec)
-- `discussions/{session_id}/round1.json` through `roundN.json`
-- `discussions/{session_id}/state.json` (risk_register, contradictions)
+- discussions/{session_id}/input.md (original spec)
+- discussions/{session_id}/debates/round1.json through debates/round{N}.json
+- discussions/{session_id}/state.json (risk_register, contradictions)
 
 Build analysis from these files. Do not rely on conversation history that may have been compacted.
 
@@ -348,7 +353,7 @@ At any point in the flow, if the session dies and is resumed, the orchestrator m
 
 The skill generates two separate files at different points:
 
-**File 1 — Debate Summary (DEBATE_SUMMARY.md)**
+**File 1 — Debate Summary (debate-summary.md)**
 - **Location:** Inside `discussions/{session_id}/`
 - **Timing:** Written immediately after all rounds complete (before architect mode)
 - **Content:**
@@ -389,10 +394,12 @@ Gates marked with **[GATE]**. Everything else is automatic.
 - If file path: read file content as spec
 - If topic: use topic text as spec
 - Generate slugified session_id from spec
-- Create `discussions/{session_id}/` directory
-- Write `input.md` with original spec
-- Initialize `state.json` with session_id
-- Write `current_step: "domain_selection"` to state.json
+- Define SESSION_DIR = "discussions/{session_id}"
+- Create SESSION_DIR directory
+- Create SESSION_DIR + "/debates/" directory
+- Write original spec to SESSION_DIR + "/input.md"
+- Initialize state.json at SESSION_DIR + "/state.json" with session_id
+- Set current_step: "domain_selection" in state.json
 
 ### Step 2: Domain selection
 - Read `.claude/skills/pre-mortem/domains.md`
@@ -413,8 +420,10 @@ Gates marked with **[GATE]**. Everything else is automatic.
   4. If write fails: print warning, continue (fallback to inline prompt)
 
 ### Step 4: Run Round 1 (parallel discovery)
-- Write `current_step: "round_1_in_progress"` to state.json
-- Write `round_responses["1"]: { agent: "pending" for each }` to state.json
+
+**Pre-launch:**
+- Write current_step: "round_1_in_progress" to discussions/{session_id}/state.json
+- Write round_responses["1"]: { agent: "pending" for each } to state.json
 - **Context overflow warning:** If `selected_domains.length >= 5`, print:
   ```
   Note: Running {N} agents in parallel at opus level will use significant context.
@@ -422,40 +431,148 @@ Gates marked with **[GATE]**. Everything else is automatic.
     /pre-mortem resume {session_id}
   All progress is saved continuously to discussions/{session_id}/state.json
   ```
+
+**Agent task instructions (injected into each critic prompt):**
+
+The orchestrator must inject these instructions at the end of every critic prompt:
+
+```
+## Output Instructions
+
+Write your complete JSON response to exactly this path:
+  discussions/{session_id}/debates/{agent_name}-round1.json
+
+The file must contain exactly one valid JSON object matching the required schema.
+Do not create any other files.
+
+After writing the file, return only this minimal JSON to the orchestrator
+(do not return your full analysis — it is already on disk):
+  { "agent": "{agent_name}", "round": 1, "status": "done", "risk_count": <number of risks> }
+```
+
+**Launch agents:**
 - Launch all critics in parallel using Agent tool
-- **As each agent completes:**
-  - Immediately append response to `round1.jsonl`
-  - Immediately update `round_responses["1"][agent] = "completed"` in state.json
-- After all complete:
-  - Compile `round1.jsonl` → `round1.json`
-  - Write `round1.md` (formatted markdown)
-  - Update state.json with risks, contradictions
+
+**Per-agent completion (orchestrator side):**
+
+When the orchestrator receives the minimal completion signal:
+1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round1.json
+2. Update round_responses["1"][agent] = "completed" in state.json
+3. Write state.json to disk
+4. Do NOT read the full response into orchestrator context
+
+On failure (status != "done" or file missing):
+1. Update round_responses["1"][agent] = "failed" in state.json
+2. Log warning: ⚠ {agent_name} round 1 failed or file missing
+3. Continue
+
+**Post-round compilation:**
+
+After all agents complete:
+1. Read all discussions/{session_id}/debates/{agent}-round1.json files
+2. Compile into discussions/{session_id}/debates/round1.json (array)
+3. Write discussions/{session_id}/debates/round1.jsonl (one object per line)
+4. Generate discussions/{session_id}/round1.md from the compiled JSON
+5. Update risk_register and contradictions in state.json from compiled data
+6. **Discard the compiled data from context** — it is on disk, not needed in memory
 
 ### Step 5: Run Round 2 (sequential debate)
-- Write `current_step: "round_2_in_progress"` to state.json
-- Write `round_responses["2"]: { agent: "pending" for each }` to state.json
+
+**Pre-launch:**
+- Write current_step: "round_2_in_progress" to discussions/{session_id}/state.json
+- Write round_responses["2"]: { agent: "pending" for each } to state.json
+
+**Agent task instructions (injected into each critic prompt):**
+
+```
+## Output Instructions
+
+Write your complete JSON response to exactly this path:
+  discussions/{session_id}/debates/{agent_name}-round2.json
+
+The file must contain exactly one valid JSON object matching the required schema.
+Do not create any other files.
+
+After writing the file, return only this minimal JSON to the orchestrator
+(do not return your full analysis — it is already on disk):
+  { "agent": "{agent_name}", "round": 2, "status": "done", "risk_count": <number of risks> }
+```
+
+**Launch agents:**
 - Critics run sequentially (one at a time, in order)
 - Each critic sees all Round 1 outputs + earlier Round 2 responses
-- **As each agent completes:**
-  - Immediately append response to `round2.jsonl`
-  - Immediately update `round_responses["2"][agent] = "completed"` in state.json
-- After all complete:
-  - Compile `round2.jsonl` → `round2.json`
-  - Write `round2.md`
-  - Update state.json
+
+**Per-agent completion (orchestrator side):**
+
+When the orchestrator receives the minimal completion signal:
+1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round2.json
+2. Update round_responses["2"][agent] = "completed" in state.json
+3. Write state.json to disk
+4. Do NOT read the full response into orchestrator context
+
+On failure:
+1. Update round_responses["2"][agent] = "failed" in state.json
+2. Log warning: ⚠ {agent_name} round 2 failed or file missing
+3. Continue
+
+**Post-round compilation:**
+
+After all agents complete:
+1. Read all discussions/{session_id}/debates/{agent}-round2.json files
+2. Compile into discussions/{session_id}/debates/round2.json (array)
+3. Write discussions/{session_id}/debates/round2.jsonl (one object per line)
+4. Generate discussions/{session_id}/round2.md from the compiled JSON
+5. Update risk_register and contradictions in state.json from compiled data
+6. **Discard the compiled data from context** — it is on disk, not needed in memory
 
 ### Step 6: Run Round 3 (parallel filter)
-- Write `current_step: "round_3_in_progress"` to state.json
-- Write `round_responses["3"]: { agent: "pending" for each }` to state.json
+
+**Pre-launch:**
+- Write current_step: "round_3_in_progress" to discussions/{session_id}/state.json
+- Write round_responses["3"]: { agent: "pending" for each } to state.json
+
+**Agent task instructions (injected into each critic prompt):**
+
+```
+## Output Instructions
+
+Write your complete JSON response to exactly this path:
+  discussions/{session_id}/debates/{agent_name}-round3.json
+
+The file must contain exactly one valid JSON object matching the required schema.
+Do not create any other files.
+
+After writing the file, return only this minimal JSON to the orchestrator
+(do not return your full analysis — it is already on disk):
+  { "agent": "{agent_name}", "round": 3, "status": "done", "risk_count": <number of risks> }
+```
+
+**Launch agents:**
 - Critics run in parallel
 - Focus ONLY on High/Med severity risks (Low risks filtered out)
-- **As each agent completes:**
-  - Immediately append response to `round3.jsonl`
-  - Immediately update `round_responses["3"][agent] = "completed"` in state.json
-- After all complete:
-  - Compile `round3.jsonl` → `round3.json`
-  - Write `round3.md`
-  - Update state.json
+
+**Per-agent completion (orchestrator side):**
+
+When the orchestrator receives the minimal completion signal:
+1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round3.json
+2. Update round_responses["3"][agent] = "completed" in state.json
+3. Write state.json to disk
+4. Do NOT read the full response into orchestrator context
+
+On failure:
+1. Update round_responses["3"][agent] = "failed" in state.json
+2. Log warning: ⚠ {agent_name} round 3 failed or file missing
+3. Continue
+
+**Post-round compilation:**
+
+After all agents complete:
+1. Read all discussions/{session_id}/debates/{agent}-round3.json files
+2. Compile into discussions/{session_id}/debates/round3.json (array)
+3. Write discussions/{session_id}/debates/round3.jsonl (one object per line)
+4. Generate discussions/{session_id}/round3.md from the compiled JSON
+5. Update risk_register and contradictions in state.json from compiled data
+6. **Discard the compiled data from context** — it is on disk, not needed in memory
 
 ### Step 7: Consensus check (automatic)
 - Write `current_step: "post_round3_consensus_check"` to state.json
@@ -472,14 +589,22 @@ Gates marked with **[GATE]**. Everything else is automatic.
 
 ### Step 8: Extra rounds (if requested)
 - Write `current_step: "extra_rounds_in_progress"` to state.json
-- Run up to 2 more rounds with same mechanics as Round 3
+- Run up to 2 more rounds (rounds 4 and 5) with same mechanics as Round 3
+- Each extra round follows the same pattern:
+  - Pre-launch: Write current_step and round_responses to state.json
+  - Inject output path instructions into critic prompts: discussions/{session_id}/debates/{agent_name}-round{N}.json
+  - Critics return minimal completion signals
+  - Orchestrator verifies files, updates state.json
+  - Post-round: Read from debates/{agent}-round{N}.json, compile to debates/round{N}.json and debates/round{N}.jsonl
+  - Generate round{N}.md from compiled JSON
+  - Discard compiled data from context
 - Check consensus after each round
 - Stop early if consensus reached
 
 ### Step 9: Write debate summary file
 - Write `current_step: "debate_summary_write"` to state.json
-- Read all round files from disk
-- Write `DEBATE_SUMMARY.md` to `discussions/{session_id}/`
+- Read all round files from discussions/{session_id}/debates/round{N}.json
+- Write debate-summary.md to discussions/{session_id}/debate-summary.md
 - Content: raw debate outcome, all risks by severity/confidence, contradictions, unresolved items, link to transcript
 - **No user input required** — automatic
 
@@ -492,9 +617,9 @@ Gates marked with **[GATE]**. Everything else is automatic.
   ─────────────────────────────────────────
   ```
 - **Reload context from disk** (Files-First Rule D):
-  - Read `discussions/{session_id}/input.md`
-  - Read `discussions/{session_id}/round1.json` through `roundN.json`
-  - Read `discussions/{session_id}/state.json`
+  - Read discussions/{session_id}/input.md
+  - Read discussions/{session_id}/debates/round1.json through debates/round{N}.json
+  - Read discussions/{session_id}/state.json
 
 ### Step 11: Architect filter (Pass A and Pass B)
 **Pass A — Verify unanchored risks (needs_verification: true):**

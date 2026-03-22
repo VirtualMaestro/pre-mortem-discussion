@@ -49,7 +49,15 @@ Skill assets live under:
 - `.claude/skills/pre-mortem-auto/*`
 
 Session artifacts live under:
-- `discussions/{session_id}/*` including `state.json`, `round*.md`, `round*.json`, and `round2.jsonl`.
+- `discussions/{session_id}/*` including:
+  - `debates/` (subfolder for all raw JSON data)
+    - `{agent}-round{N}.json` (per-critic output, written by critic)
+    - `round{N}.json` (compiled array, written by orchestrator)
+    - `round{N}.jsonl` (incremental log, written by orchestrator)
+  - `state.json` (execution state, risk register, current step)
+  - `input.md` (original spec)
+  - `round{N}.md` (human-readable round logs)
+  - `debate-summary.md` (raw debate outcome, written after rounds)
 
 ## Session folder naming
 Use slugified topic names instead of timestamps:
@@ -273,7 +281,7 @@ If a single risk object is missing required fields (`id`, `name`, `severity`, `d
 
 Rationale: `severity` is a core routing field — invalid severity would silently miscategorize the risk. `confidence` is supplementary signal — defaulting to `Med` is safe.
 
-Round 2 persistence (robust): append each critic response as a line to `round2.jsonl`; at end compile to `round2.json` array.
+Round 2 persistence (robust): append each critic response as a line to `debates/round2.jsonl`; at end compile to `debates/round2.json` array.
 
 ## Prompt canonicalization + drift handling (automatic)
 - Agent prompts live in `.claude/agents/{name}.md` and are treated as canonical.
@@ -336,10 +344,12 @@ For `round_N_in_progress`:
 - If file path: read file content as spec
 - If topic: use topic text as spec
 - Generate slugified session_id from spec
-- Create `discussions/{session_id}/` directory
-- Write spec to `discussions/{session_id}/input.md`
-- Initialize `state.json` with session_id
-- Set `current_step: "domain_selection"` in state.json
+- Define SESSION_DIR = "discussions/{session_id}"
+- Create SESSION_DIR directory
+- Create SESSION_DIR + "/debates/" directory
+- Write original spec to SESSION_DIR + "/input.md"
+- Initialize state.json at SESSION_DIR + "/state.json" with session_id
+- Set current_step: "domain_selection" in state.json
 
 ### Step 2: Automatic domain selection
 - Score domains from `.claude/skills/pre-mortem-auto/domains.md`
@@ -390,44 +400,67 @@ Before launching parallel rounds with 5+ agents, print:
 ⚠️ CONTEXT OVERFLOW WARNING
 This round will launch N agents in parallel. If the session times out or loses context:
   /pre-mortem-auto resume {session_id}
-Progress is saved continuously to state.json and roundN.jsonl files.
+Progress is saved continuously to state.json and debates/roundN.jsonl files.
 ```
 
 **Round execution pattern (all rounds):**
 
 For each round N:
 
-1. **Pre-launch state write:**
-   - Set `current_step: "round_N_in_progress"` in state.json
-   - Initialize `round_responses[N]: {agent: "pending"}` for each agent in round_order[N]
-   - Write state.json to disk
+**Pre-launch (before each round N):**
+1. Write current_step: "round_N_in_progress" to discussions/{session_id}/state.json
+2. Write round_responses[N]: { agent: "pending" } for each agent to state.json
 
-2. **Launch agents:**
-   - Rounds 1,3,5: launch all agents in parallel
-   - Rounds 2,4: launch sequentially using round_order[N]
-   - Use round_order[N] for agent sequence
+**Agent task instructions (injected into each critic prompt):**
 
-3. **Per-agent completion:**
-   - AS EACH AGENT COMPLETES:
-     - Append response to `roundN.jsonl` (one JSON object per line)
-     - Update `round_responses[N][agent] = "completed"` in state.json
-     - Write state.json to disk
-   - If agent fails:
-     - Append FAILED stub to `roundN.jsonl`
-     - Update `round_responses[N][agent] = "failed"` in state.json
-     - Write state.json to disk
+The orchestrator must inject these instructions at the end of every critic prompt:
 
-4. **Post-round compilation:**
-   - Compile `roundN.jsonl` → `roundN.json` (array of all responses)
-   - Generate `roundN.md` (human-readable log)
-   - Update risk_register, contradictions in state.json
-   - Write state.json to disk
+```
+## Output Instructions
 
-5. **Consensus check:**
-   - Evaluate consensus criterion from state.json
-   - If reached: print "Consensus reached after round N", proceed to Step 5
-   - If not reached and N < 5: continue to round N+1
-   - If not reached and N == 5: proceed to Step 5
+Write your complete JSON response to exactly this path:
+  discussions/{session_id}/debates/{agent_name}-round{N}.json
+
+The file must contain exactly one valid JSON object matching the required schema.
+Do not create any other files.
+
+After writing the file, return only this minimal JSON to the orchestrator
+(do not return your full analysis — it is already on disk):
+  { "agent": "{agent_name}", "round": {N}, "status": "done", "risk_count": <number of risks> }
+```
+
+**Per-agent completion (orchestrator side):**
+
+When the orchestrator receives the minimal completion signal:
+1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round{N}.json
+2. Update round_responses[N][agent] = "completed" in state.json
+3. Write state.json to disk
+4. Do NOT read the full response into orchestrator context
+
+On failure (status != "done" or file missing):
+1. Update round_responses[N][agent] = "failed" in state.json
+2. Log warning: ⚠ {agent_name} round {N} failed or file missing
+3. Continue
+
+**Post-round compilation (orchestrator side):**
+
+After all agents complete:
+1. Read all discussions/{session_id}/debates/{agent}-round{N}.json files
+2. Compile into discussions/{session_id}/debates/round{N}.json (array)
+3. Write discussions/{session_id}/debates/round{N}.jsonl (one object per line)
+4. Generate discussions/{session_id}/round{N}.md from the compiled JSON
+5. Update risk_register and contradictions in state.json from compiled data
+6. **Discard the compiled data from context** — it is on disk, not needed in memory
+
+**Launch pattern:**
+- Rounds 1,3,5: launch all agents in parallel using round_order[N]
+- Rounds 2,4: launch sequentially using round_order[N]
+
+**Consensus check:**
+- Evaluate consensus criterion from state.json
+- If reached: print "Consensus reached after round N", proceed to Step 5
+- If not reached and N < 5: continue to round N+1
+- If not reached and N == 5: proceed to Step 5
 
 **Round 1: Parallel discovery**
 - Launch all critics in parallel using round_order[1]
@@ -457,7 +490,8 @@ For each round N:
 
 ### Step 5: Write debate summary
 - Set `current_step: "debate_summary_write"` in state.json
-- Write `debate-summary.md` to session folder
+- Read all round files from discussions/{session_id}/debates/round{N}.json
+- Write debate-summary.md to discussions/{session_id}/debate-summary.md
 - Include:
   - Total rounds run
   - Consensus status
@@ -480,9 +514,9 @@ For each round N:
 **Context reload:**
 
 Before analysis, architect must reload all context from disk:
-- Read `discussions/{session_id}/input.md`
-- Read all `discussions/{session_id}/roundN.json` files (N=1 to last round)
-- Read `discussions/{session_id}/state.json`
+- Read discussions/{session_id}/input.md
+- Read all discussions/{session_id}/debates/round{N}.json files (N=1 to last round)
+- Read discussions/{session_id}/state.json
 - Do NOT rely on conversation history (may be truncated)
 
 **Pass 0: Review resolved items**
