@@ -1,6 +1,6 @@
 {
   "name": "pre-mortem-discussion",
-  "version": "0.1.2",
+  "version": "1.0.0",
   "description": "Scaffold the Claude Code pre-mortem discussion skill into a project",
   "license": "MIT",
   "repository": {
