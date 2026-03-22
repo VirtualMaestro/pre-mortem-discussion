@@ -62,6 +62,15 @@ After scaffolding, run either skill inside Claude Code:
 - `/pre-mortem <topic or file>` — manual mode
 - `/pre-mortem-auto <topic or file>` — automatic mode
 
+**Resume after context overflow:**
+
+If a session stops due to context overflow (common with 5 agents × multiple rounds), resume with:
+
+- `/pre-mortem resume {session_id}` — manual mode resume
+- `/pre-mortem-auto resume {session_id}` — automatic mode resume
+
+Progress is saved continuously to `discussions/{session_id}/state.json`. Only incomplete work is re-run.
+
 ## Non-goals
 
 - Scaffold-only: does not run any sessions.
