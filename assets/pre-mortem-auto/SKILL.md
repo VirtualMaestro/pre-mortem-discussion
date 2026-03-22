@@ -61,6 +61,41 @@ Use slugified topic names instead of timestamps:
 
 Store `session_id` in `state.json` matching folder name.
 
+## state.json Schema (normative)
+
+Session state file `discussions/{session_id}/state.json` structure:
+
+**Core fields:**
+- `session_id` (string): matches folder name
+- `selected_domains` (array of strings): approved critic domains
+- `current_step` (string): execution phase for resume capability
+
+**Round tracking:**
+- `round_responses` (object): nested structure `{1: {agent: status}, 2: {...}, ...}`
+  - Status values: `"pending"`, `"completed"`, `"failed"`
+- `round_order` (object): `{1: [agents], 2: [agents], 3: [agents], 4: [agents], 5: [agents]}`
+  - Rounds 1,3,5: original domain order
+  - Rounds 2,4: left-shifted rotation (see Round ordering section)
+
+**Risk management:**
+- `risk_register` (array): all risks with status, needs_verification, confidence
+- `user_decisions` (object): blocking question resolutions (informational)
+- `contradictions` (array): contradiction objects with resolution status
+
+**Prompt tracking:**
+- `agent_prompt_sha256` (object): `{agent: hash}` for drift detection
+- `prompt_drift_log` (array): history of prompt changes
+
+**current_step values:**
+- `domain_selection` - selecting critic domains
+- `agent_file_generation` - writing agent files
+- `round_1_in_progress` through `round_5_in_progress` - debate rounds
+- `debate_summary_write` - writing debate summary
+- `architect_mode_active` - architect analyzing
+- `architect_resolving` - architect making decisions
+- `final_artifact_write` - generating output
+- `done` - session complete
+
 ## Human gates (minimal)
 This is the **automatic mode** — minimize user interruption.
 
@@ -251,10 +286,48 @@ Round 2 persistence (robust): append each critic response as a line to `round2.j
 ## Consensus criterion (formal definition)
 Consensus is reached when ALL of the following are true:
 1. Zero `"High"` severity risks with status `"open"` in `state.json`
-2. All `blocking_question` fields resolved in `state.json.user_decisions`
-3. No unresolved contradictions in `state.json.contradictions`
+2. No unresolved contradictions in `state.json.contradictions`
 
 Evaluate programmatically from state.json after each round (not LLM judgment).
+
+**Note:** `blocking_question` fields are informational only and do not block consensus. The architect resolves all blocking questions autonomously in Step 8.
+
+## Resume command
+
+Syntax: `/pre-mortem-auto resume {session_id}`
+
+**Behavior:**
+1. Read `discussions/{session_id}/state.json`
+2. Check `current_step` field
+3. Jump to appropriate phase based on step value
+4. Only re-run incomplete work (where `round_responses[N][agent] != "completed"`)
+
+**Resume jump table:**
+
+| current_step | Resume action |
+|--------------|---------------|
+| `domain_selection` | Re-run Step 2 (domain selection) |
+| `agent_file_generation` | Re-run Step 3 (agent file generation) |
+| `round_N_in_progress` | Resume round N, skip completed agents |
+| `debate_summary_write` | Re-run Step 5 (debate summary) |
+| `architect_mode_active` | Re-run Step 7 (architect filter) |
+| `architect_resolving` | Re-run Step 8 (architect decisions) |
+| `final_artifact_write` | Re-run Step 10 (output artifact) |
+| `done` | Print "Session already complete" and exit |
+
+**Round resume logic:**
+
+For `round_N_in_progress`:
+1. Read `round_responses[N]` from state.json
+2. Identify agents where status != `"completed"`
+3. Re-run only those agents
+4. For Round 2 (sequential): resume from first incomplete agent, maintaining order
+5. For Rounds 1,3,4,5 (parallel): re-run incomplete agents in parallel
+
+**Error handling:**
+- Missing state.json: print error, exit
+- Invalid current_step: print error, exit
+- Corrupted round_responses: print warning, re-run entire round
 
 ## Execution flow (Automatic Mode)
 
@@ -264,14 +337,19 @@ Evaluate programmatically from state.json after each round (not LLM judgment).
 - If topic: use topic text as spec
 - Generate slugified session_id from spec
 - Create `discussions/{session_id}/` directory
+- Write spec to `discussions/{session_id}/input.md`
 - Initialize `state.json` with session_id
+- Set `current_step: "domain_selection"` in state.json
 
 ### Step 2: Automatic domain selection
 - Score domains from `.claude/skills/pre-mortem-auto/domains.md`
 - Auto-select top 5 domains (score >= 2)
 - Print selected experts with signal counts (no user approval)
 - Store in `state.json.selected_domains`
-- Proceed immediately
+- Compute round_order with rotation (see Round ordering section)
+- Store round_order in state.json
+- Set `current_step: "agent_file_generation"`
+- Proceed to Step 3
 
 ### Step 3: Generate agent files
 For each domain in `selected_domains`:
@@ -298,47 +376,87 @@ For each domain in `selected_domains`:
 
 **Important:** This step ensures agent prompts are persisted for reuse and manual refinement. The orchestrator can still function if writes fail (inline prompt fallback).
 
+After all agent files processed:
+- Set `current_step: "round_1_in_progress"`
+
 ### Step 4: Run rounds automatically (up to 5)
-Run rounds in sequence until consensus reached OR 5 rounds completed:
+
+Run rounds in sequence until consensus reached OR 5 rounds completed.
+
+**Context overflow protection:**
+
+Before launching parallel rounds with 5+ agents, print:
+```
+⚠️ CONTEXT OVERFLOW WARNING
+This round will launch N agents in parallel. If the session times out or loses context:
+  /pre-mortem-auto resume {session_id}
+Progress is saved continuously to state.json and roundN.jsonl files.
+```
+
+**Round execution pattern (all rounds):**
+
+For each round N:
+
+1. **Pre-launch state write:**
+   - Set `current_step: "round_N_in_progress"` in state.json
+   - Initialize `round_responses[N]: {agent: "pending"}` for each agent in round_order[N]
+   - Write state.json to disk
+
+2. **Launch agents:**
+   - Rounds 1,3,5: launch all agents in parallel
+   - Rounds 2,4: launch sequentially using round_order[N]
+   - Use round_order[N] for agent sequence
+
+3. **Per-agent completion:**
+   - AS EACH AGENT COMPLETES:
+     - Append response to `roundN.jsonl` (one JSON object per line)
+     - Update `round_responses[N][agent] = "completed"` in state.json
+     - Write state.json to disk
+   - If agent fails:
+     - Append FAILED stub to `roundN.jsonl`
+     - Update `round_responses[N][agent] = "failed"` in state.json
+     - Write state.json to disk
+
+4. **Post-round compilation:**
+   - Compile `roundN.jsonl` → `roundN.json` (array of all responses)
+   - Generate `roundN.md` (human-readable log)
+   - Update risk_register, contradictions in state.json
+   - Write state.json to disk
+
+5. **Consensus check:**
+   - Evaluate consensus criterion from state.json
+   - If reached: print "Consensus reached after round N", proceed to Step 5
+   - If not reached and N < 5: continue to round N+1
+   - If not reached and N == 5: proceed to Step 5
 
 **Round 1: Parallel discovery**
-- Launch all critics in parallel
+- Launch all critics in parallel using round_order[1]
 - Each critic identifies risks independently
-- Collect JSON outputs
-- Validate and write `round1.json` and `round1.md`
-- Update `state.json`
-- Check consensus → if reached, go to Step 5; else continue
+- No visibility into other critics' outputs
+- Goal: comprehensive risk catalog
 
 **Round 2: Sequential debate**
-- Critics run sequentially, each sees prior outputs
+- Launch critics sequentially using round_order[2] (left-shifted rotation)
+- Each sees all prior outputs (Round 1 + earlier Round 2 responses)
 - Focus on contradictions and refinement
-- Append to `round2.jsonl` as each completes
-- Compile to `round2.json` at end
-- Write `round2.md`
-- Update `state.json`
-- Check consensus → if reached, go to Step 5; else continue
+- Goal: challenge assumptions, identify contradictions
 
 **Round 3: Parallel filter**
-- Critics run in parallel
-- Focus on High/Med risks only
-- Validate solutions and tradeoffs
-- Write `round3.json` and `round3.md`
-- Update `state.json`
-- Check consensus → if reached, go to Step 5; else continue
+- Launch all critics in parallel using round_order[3]
+- Focus ONLY on High/Med severity risks
+- Goal: validate solutions, assess tradeoffs
 
 **Round 4: Parallel filter**
+- Launch all critics in parallel using round_order[4] (left-shifted rotation)
 - Same semantics as Round 3
-- Write `round4.json` and `round4.md`
-- Update `state.json`
-- Check consensus → if reached, go to Step 5; else continue
 
 **Round 5: Parallel filter (final)**
+- Launch all critics in parallel using round_order[5]
 - Same semantics as Round 3
-- Write `round5.json` and `round5.md`
-- Update `state.json`
 - Proceed to Step 5 regardless of consensus
 
 ### Step 5: Write debate summary
+- Set `current_step: "debate_summary_write"` in state.json
 - Write `debate-summary.md` to session folder
 - Include:
   - Total rounds run
@@ -348,6 +466,7 @@ Run rounds in sequence until consensus reached OR 5 rounds completed:
   - Unresolved items
 
 ### Step 6: Switch to Architect Mode
+- Set `current_step: "architect_mode_active"` in state.json
 - Print separator:
   ```
   ─────────────────────────────────────────
@@ -357,8 +476,31 @@ Run rounds in sequence until consensus reached OR 5 rounds completed:
 - Orchestrator now operates as Chief Architect
 
 ### Step 7: Architect filter (Mode B)
+
+**Context reload:**
+
+Before analysis, architect must reload all context from disk:
+- Read `discussions/{session_id}/input.md`
+- Read all `discussions/{session_id}/roundN.json` files (N=1 to last round)
+- Read `discussions/{session_id}/state.json`
+- Do NOT rely on conversation history (may be truncated)
+
+**Pass 0: Review resolved items**
+
+For each risk where `status: "resolved"` OR `status: "compromise"`:
+- Architect reviews the resolution decision
+- **If architect disagrees:**
+  - Set `status: "open"` in state.json
+  - Log to console:
+    ```
+    [ARCHITECT] Reopened · {risk_id} · {risk_name}
+      Reason: {one-line explanation}
+    ```
+- **If architect agrees:** no action, keep status as-is
+
 **Pass A: Verify unanchored risks (needs_verification: true)**
-For each risk where `needs_verification: true`:
+
+For each risk where `needs_verification: true` AND `status: "open"`:
 - Architect reads the spec and checks whether the risk is actually grounded
 - **If grounded:** remove `needs_verification` flag, keep risk as-is
 - **If not grounded:** set `status: "dismissed"`, log to console:
@@ -368,15 +510,21 @@ For each risk where `needs_verification: true`:
   ```
 
 **Pass B: Label low-confidence risks (confidence: "Low")**
+
 For each risk where `confidence: "Low"` and `status != "dismissed"`:
 - Include in output artifact with `⚠️ Low confidence` label
 - Add to dedicated `## Low-Confidence Risks` subsection in output artifact
 - Add note: "These risks may become relevant depending on implementation choices not yet specified in the spec."
 
-**Pass A always executes before Pass B. Risks dismissed in Pass A are excluded from Pass B processing.**
+**Execution order: Pass 0 → Pass A → Pass B**
+
+Risks dismissed in Pass A are excluded from Pass B processing.
 
 ### Step 8: Architect resolves all open items autonomously
-For each High/Med unresolved risk (after Pass A/B filtering):
+
+Set `current_step: "architect_resolving"` in state.json.
+
+For each High/Med risk with `status: "open"` (after Pass 0/A/B filtering):
 - Decide: ACCEPT RISK | MITIGATE | REJECT FEATURE | DEFER | ESCALATE
 - If decision requires external knowledge → escalate to user via AskUserQuestion
 - Otherwise → decide autonomously and log reasoning
@@ -405,6 +553,9 @@ For each High/Med decision, print:
 ```
 
 ### Step 10: Generate output artifact
+
+Set `current_step: "final_artifact_write"` in state.json.
+
 - Detect appropriate file type (see Genre-matching section)
 - Write artifact to project root or next to input file
 - Include:
@@ -413,6 +564,9 @@ For each High/Med decision, print:
   - `## Known Issues` section (deferred/accepted risks)
   - Low-confidence risks in separate `## Low-Confidence Risks` section
   - `## Debate Summary` section (brief stats + session folder link)
+
+After artifact written:
+- Set `current_step: "done"` in state.json
 
 ### Step 11: Cleanup offer
 - AskUserQuestion: "Delete discussions/{session_id}/ folder?"
@@ -438,6 +592,37 @@ For each High/Med decision, print:
 - Focus ONLY on High/Med severity risks
 - Goal: validate solutions, assess tradeoffs
 - Output: actionable risk mitigation strategies
+
+## Round ordering
+
+**Computation (at session init, Step 2):**
+
+Given `selected_domains = [A, B, C, D, E]`:
+
+```
+round_order[1] = [A, B, C, D, E]  // original order
+round_order[2] = [B, C, D, E, A]  // left-shift by 1
+round_order[3] = [C, D, E, A, B]  // left-shift by 1 again
+round_order[4] = [D, E, A, B, C]  // left-shift by 1 again
+round_order[5] = [E, A, B, C, D]  // left-shift by 1 again
+```
+
+**Left-shift rotation:**
+- Take first element, move to end
+- Example: `[A,B,C,D,E]` → `[B,C,D,E,A]`
+
+**Storage:**
+Store complete `round_order` object in state.json at session init.
+
+**Usage:**
+- Rounds 1,3,5: parallel execution (order stored for audit, doesn't affect execution)
+- Rounds 2,4: sequential execution using specified order
+
+**Rationale:**
+Rounds 2 and 4 are sequential debate rounds. Rotation ensures:
+- Different agent speaks first in each sequential round
+- Reduces first-mover bias
+- All agents get opportunity to lead debate
 
 ## Output artifact genre-matching
 
