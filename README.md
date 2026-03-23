@@ -1,39 +1,21 @@
 # pre-mortem-discussion
 
-Scaffold Claude Code **pre-mortem discussion** skills into the project you run it from.
-
-Two skills are available:
-- `/pre-mortem` — Manual mode with human gates and approval loops
-- `/pre-mortem-auto` — Automatic mode with minimal interruption
+Scaffold Claude Code **pre-mortem discussion** skill into the project you run it from.
 
 ## Install / run
 
 ```bash
-# Scaffold both skills (default)
 npx pre-mortem-discussion
-
-# Scaffold only one skill
-npx pre-mortem-discussion --skill pre-mortem
-npx pre-mortem-discussion --skill pre-mortem-auto
 ```
 
 ## What it writes
 
-By default, scaffolds both skills into the target project:
+Scaffolds the `/pre-mortem` skill into the target project:
 
-**`/pre-mortem` skill:**
 - `.claude/skills/pre-mortem/SKILL.md`
 - `.claude/skills/pre-mortem/agent-template.md`
 - `.claude/skills/pre-mortem/domains.md`
-- `.claude/skills/pre-mortem/domains.generated.md`
 - `.claude/skills/pre-mortem/.scaffold-meta.json`
-
-**`/pre-mortem-auto` skill:**
-- `.claude/skills/pre-mortem-auto/SKILL.md`
-- `.claude/skills/pre-mortem-auto/agent-template.md`
-- `.claude/skills/pre-mortem-auto/domains.md`
-- `.claude/skills/pre-mortem-auto/domains.generated.md`
-- `.claude/skills/pre-mortem-auto/.scaffold-meta.json`
 
 ## Update policy (non-destructive)
 
@@ -45,31 +27,44 @@ Per file, on re-run:
 
 If any `*.incoming` files are created, the CLI exits with code **2**.
 
-## Skill comparison
+## Usage
 
-| Feature | `/pre-mortem` | `/pre-mortem-auto` |
-|---------|---------------|-------------------|
-| Domain selection | User approves expert panel | Auto-selected, printed |
-| Max rounds | 3 + optional 2 more (user gate) | 5 automatic |
-| Consensus check | After round 3, user decides | Automatic early stop |
-| Architect decisions | User approval required | Autonomous (escalates only blockers) |
-| Best for | Critical decisions, high stakes | Rapid iteration, exploratory work |
+After scaffolding, run the skill inside Claude Code:
 
-## Next step
+```bash
+# Automatic expert selection (Mode A)
+/pre-mortem <topic or file>
 
-After scaffolding, run either skill inside Claude Code:
+# Manual expert override (Mode B)
+/pre-mortem <topic or file> --experts <e1>, <e2>, ..., <eN>
+```
 
-- `/pre-mortem <topic or file>` — manual mode
-- `/pre-mortem-auto <topic or file>` — automatic mode
+**Examples:**
+```bash
+/pre-mortem proposal.md
+/pre-mortem proposal.md --experts security, database, frontend
+/pre-mortem "OAuth2 with JWT for mobile"
+/pre-mortem "OAuth2 with JWT for mobile" --experts security, api
+```
 
 **Resume after context overflow:**
 
 If a session stops due to context overflow (common with 5 agents × multiple rounds), resume with:
 
-- `/pre-mortem resume {session_id}` — manual mode resume
-- `/pre-mortem-auto resume {session_id}` — automatic mode resume
+```bash
+/pre-mortem resume {name}
+```
 
-Progress is saved continuously to `discussions/{session_id}/state.json`. Only incomplete work is re-run.
+Progress is saved continuously to `discussions/{name}/state.json`. Only incomplete work is re-run.
+
+## Features
+
+- **Two modes:** Automatic expert selection (Mode A) or manual override (Mode B)
+- **Exactly 3 rounds:** Parallel discovery → Sequential debate → Parallel filter
+- **15 domain experts:** tech, security, database, api, frontend, mobile, ux, scalability, devops, infra, legal, cost, integration, data
+- **4-step finalization:** Creates approved.md, renames original, generates ADR, cleans up session
+- **Architect dialogue:** Open-ended conversation to resolve all risks
+- **Files-first architecture:** Crash recovery and resume capability
 
 ## Non-goals
 

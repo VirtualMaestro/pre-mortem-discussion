@@ -26,6 +26,5 @@ export function listSkillAssetTemplates(skillName: string): AssetTemplate[] {
     { fileName: "SKILL.md", content: readAsset(skillName, "SKILL.md") },
     { fileName: "agent-template.md", content: readAsset(skillName, "agent-template.md") },
     { fileName: "domains.md", content: readAsset(skillName, "domains.md") },
-    { fileName: "domains.generated.md", content: readAsset(skillName, "domains.generated.md") },
   ];
 }

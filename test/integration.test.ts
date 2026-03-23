@@ -28,11 +28,11 @@ describe("scaffoldPreMortemSkill integration", () => {
     expect(sha256Hex(writtenSkill)).toBe(sha256Hex(assetSkill));
   });
 
-  it("creates 4 files + meta; rerun is idempotent; modified file yields incoming", async () => {
+  it("creates 3 files + meta; rerun is idempotent; modified file yields incoming", async () => {
     const cwd = await mkTmpDir();
 
     const r1 = await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem" });
-    expect(r1.entries.filter((e) => e.action === "WROTE").length).toBe(4);
+    expect(r1.entries.filter((e) => e.action === "WROTE").length).toBe(3);
 
     const skillDir = path.join(cwd, ".claude", "skills", "pre-mortem");
     const metaPath = path.join(skillDir, ".scaffold-meta.json");
@@ -50,43 +50,5 @@ describe("scaffoldPreMortemSkill integration", () => {
 
     const incomingPath = path.join(skillDir, "SKILL.md.incoming");
     await expect(fs.stat(incomingPath)).resolves.toBeTruthy();
-  });
-
-  it("scaffolds both skills independently with separate metadata", async () => {
-    const cwd = await mkTmpDir();
-
-    const r1 = await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem" });
-    const r2 = await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem-auto" });
-
-    expect(r1.entries.filter((e) => e.action === "WROTE").length).toBe(4);
-    expect(r2.entries.filter((e) => e.action === "WROTE").length).toBe(4);
-
-    const skillDir1 = path.join(cwd, ".claude", "skills", "pre-mortem");
-    const skillDir2 = path.join(cwd, ".claude", "skills", "pre-mortem-auto");
-
-    await expect(fs.stat(path.join(skillDir1, ".scaffold-meta.json"))).resolves.toBeTruthy();
-    await expect(fs.stat(path.join(skillDir2, ".scaffold-meta.json"))).resolves.toBeTruthy();
-
-    await expect(fs.stat(path.join(skillDir1, "SKILL.md"))).resolves.toBeTruthy();
-    await expect(fs.stat(path.join(skillDir2, "SKILL.md"))).resolves.toBeTruthy();
-  });
-
-  it("conflict detection works independently per skill", async () => {
-    const cwd = await mkTmpDir();
-
-    await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem" });
-    await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem-auto" });
-
-    const skillPath1 = path.join(cwd, ".claude", "skills", "pre-mortem", "SKILL.md");
-    await fs.appendFile(skillPath1, "\nUSER_EDIT_1\n", "utf8");
-
-    const r1 = await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem" });
-    const r2 = await scaffoldPreMortemSkill({ cwd, skillName: "pre-mortem-auto" });
-
-    const conflict1 = r1.entries.find((e) => e.action === "CONFLICT");
-    const conflict2 = r2.entries.find((e) => e.action === "CONFLICT");
-
-    expect(conflict1).toBeTruthy();
-    expect(conflict2).toBeUndefined();
   });
 });

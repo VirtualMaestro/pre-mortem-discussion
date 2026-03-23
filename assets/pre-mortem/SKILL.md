@@ -1,13 +1,41 @@
-# /pre-mortem — Multi-Agent Pre-Mortem (Spec v6.0)
+# /pre-mortem — Multi-Agent Pre-Mortem (Spec v7.0)
 
 This skill orchestrates a structured multi-agent pre-mortem with minimal user gates.
 Scaffolded by `npx pre-mortem-discussion`.
 
-**Major changes in v6.0:**
-- Rounds 1-3 run automatically (no gates between rounds)
-- Two output files: debate summary + final solution
-- Context overflow protection with resume capability
-- Files-first architecture for crash recovery
+**Major changes in v7.0:**
+- Single unified skill with optional --experts flag (Mode A: auto, Mode B: manual)
+- Exactly 3 rounds (no extra rounds)
+- Expanded domain catalog (15 domains)
+- 4-step finalization process (approved.md, rename, adr.md, cleanup)
+- Direct updates to domains.md (no domains.generated.md)
+
+## Command Syntax
+
+/pre-mortem <file_or_topic>
+/pre-mortem <file_or_topic> --experts <e1>, <e2>, ..., <eN>
+
+**Mode A (no --experts flag):** Automatic expert selection
+- Scores all domains by trigger hits in spec
+- Selects top 5 (score ≥ 2)
+- Always includes tech-critic
+- Prints selected experts with signal counts
+- Proceeds immediately to debate (no gate)
+
+**Mode B (with --experts flag):** Manual override
+- Uses user-specified experts
+- Creates new agent files if not found
+- Architect fills remaining slots (up to 5 total)
+- Prints final panel
+- Proceeds to debate
+
+**Examples:**
+```
+/pre-mortem proposal.md
+/pre-mortem proposal.md --experts security, database, frontend
+/pre-mortem "OAuth2 with JWT for mobile"
+/pre-mortem "OAuth2 with JWT for mobile" --experts security, api
+```
 
 ## Non-goals
 - This skill does **not** auto-run on scaffold.
@@ -33,7 +61,7 @@ Skill assets live under:
 - `.claude/skills/pre-mortem/*`
 
 Session artifacts live under:
-- `discussions/{session_id}/*` including:
+- `discussions/{name}/*` including:
   - `debates/` (subfolder for all raw JSON data)
     - `{agent}-round{N}.json` (per-critic output, written by critic)
     - `round{N}.json` (compiled array, written by orchestrator)
@@ -44,35 +72,86 @@ Session artifacts live under:
   - `debate-summary.md` (raw debate outcome, written after rounds)
 
 ## Session folder naming
-Use slugified topic names instead of timestamps:
-1. Extract first ~5 meaningful words from spec/topic
-2. Slugify: lowercase, spaces→hyphens, strip special chars (keep only `a-z0-9-`)
-3. Append 4-digit suffix: last 4 digits of unix timestamp (milliseconds)
-4. Example: `discussions/oauth-jwt-mobile-app-3847/`
+
+session_id = {name}
+
+**File input:** {name} = basename without extension
+Example: `proposal.md` → `discussions/proposal/`
+
+**Text input:** {name} = slugified topic (first ~5 words) + 4-digit suffix
+Example: `"OAuth JWT mobile"` → `discussions/oauth-jwt-mobile-3847/`
 
 Store `session_id` in `state.json` matching folder name.
 
 ## Human gates (MUST use AskUserQuestion)
+
 **Rounds 1, 2, and 3 run automatically with no user approval between them.**
 
-Only 3 gates in the entire flow:
-- **Gate 0:** Domain selection (before Round 1) — user confirms or modifies expert panel
-- **Gate 4 (conditional):** Extra rounds offer (only if consensus NOT reached after Round 3)
+Only 1 gate in the entire flow:
 - **Gate 5:** Cleanup offer (delete discussions folder at end)
 
-No gates between rounds. No approve/reject for architect decisions.
+No gates for:
+- Domain selection (Mode A prints and proceeds; Mode B proceeds after resolution)
+- Between rounds (automatic flow)
+- Extra rounds (removed — exactly 3 rounds)
+- Architect decisions (open dialogue, not approve/reject)
 
-## Deterministic domain selection (Gate 0)
-1) Read `.claude/skills/pre-mortem/domains.md`.
-2) Score each domain by trigger hits in the user spec.
-   - Tokens: exact token match after tokenization (preferred)
-   - Phrases: exact phrase match
+## Expert Selection
+
+### Mode A — Automatic (no --experts flag)
+
+1. Read `.claude/skills/pre-mortem/domains.md`
+2. Score each domain by trigger hits in the spec:
+   - Token match: exact token after tokenization (avoid substring: `auth` ≠ `author`)
+   - Phrase match: exact phrase match
    - Case-insensitive
-   - Avoid substring matches (`auth` must not match `author`).
-3) Keep domains with score >= 2 OR explicitly requested by the user.
-4) Always include `tech-critic` for technical specs.
-5) Cap at 5 (highest scores).
-6) Ask user to approve/modify the list (Gate 0). Do not proceed without approval.
+3. Keep domains with score ≥ 2
+4. Always include `tech-critic` for technical specs
+5. Cap at 5 (highest scores)
+6. Print selected experts with signal counts — **no user approval needed**:
+   ```
+   Selected experts (auto):
+   - security-critic (8 signals)
+   - tech-critic (12 signals)
+   - database-critic (5 signals)
+   ```
+7. Proceed immediately to Round 1
+
+### Mode B — Manual Override (with --experts flag)
+
+For each name in `--experts`:
+
+1. Search `.claude/agents/` for a file matching `{name}-critic.md`
+   - Use glob: `.claude/agents/*{name}*` (case-insensitive)
+   - If found: use that agent file
+   - If not found: create `.claude/agents/{name}-critic.md` using
+     `agent-template.md`, tailored to the domain described by `{name}`
+
+2. After resolving all user-specified experts:
+   - If count < 5: architect scores remaining domains from `domains.md`
+     and adds up to `(5 - count)` additional experts
+   - If count = 5: no additions, proceed with exactly those 5
+
+3. Print final expert list (user-specified + architect additions):
+   ```
+   Expert panel:
+   - security-critic    (specified by user)
+   - database-critic    (specified by user)
+   - tech-critic        (added by architect — 9 signals)
+   - api-critic         (added by architect — 4 signals)
+   ```
+4. Proceed to Round 1
+
+### New Agent File Creation
+
+When an expert name is not found in `.claude/agents/`:
+- Generate `{name}-critic.md` using `agent-template.md`
+- Tailor focus areas to the domain implied by `{name}`
+- Add a new entry to `domains.md` for this domain
+- Print: `✓ Created .claude/agents/{name}-critic.md`
+
+**`domains.md` is always updated directly** — no intermediate
+`domains.md`. The file grows organically as new experts are created.
 
 ## Agent execution model
 - Do NOT route via named `subagent_type` (file-based discovery unreliable). Always use `subagent_type: "general-purpose"`.
@@ -265,12 +344,9 @@ The `state.json` file is the single source of truth for session state. It must i
 - `"round_1_in_progress"` — Round 1 executing
 - `"round_2_in_progress"` — Round 2 executing
 - `"round_3_in_progress"` — Round 3 executing
-- `"extra_rounds_in_progress"` — Extra rounds executing
-- `"post_round3_consensus_check"` — Evaluating consensus
 - `"debate_summary_write"` — Writing debate-summary.md
 - `"architect_mode_active"` — Architect analyzing debate
 - `"human_architect_dialogue"` — Open conversation with user
-- `"final_artifact_write"` — Writing final solution file
 - `"done"` — Session complete
 
 **round_responses structure:**
@@ -287,11 +363,11 @@ The `state.json` file is the single source of truth for session state. It must i
 
 Status values: `"pending"`, `"completed"`, `"failed"`
 
-## Resume command: /pre-mortem resume {session_id}
+## Resume command: /pre-mortem resume {name}
 
 If a session crashes (context overflow, network issue, etc.), resume with:
 ```
-/pre-mortem resume {session_id}
+/pre-mortem resume {name}
 ```
 
 **Resume logic by current_step:**
@@ -301,12 +377,9 @@ If a session crashes (context overflow, network issue, etc.), resume with:
 | `round_1_in_progress` | Re-run Round 1 for agents where status != "completed" |
 | `round_2_in_progress` | Re-run Round 2 for incomplete agents |
 | `round_3_in_progress` | Re-run Round 3 for incomplete agents |
-| `extra_rounds_in_progress` | Re-run current extra round for incomplete agents |
-| `post_round3_consensus_check` | Run consensus check from state.json data |
 | `debate_summary_write` | Write debate summary (skip if file exists) |
 | `architect_mode_active` | Print transition, reload context from files, start analysis |
 | `human_architect_dialogue` | Reload from debate summary, continue conversation |
-| `final_artifact_write` | Re-generate final artifact (ask before overwriting) |
 | `done` | Tell user session complete, show file locations |
 
 **Idempotency rules:**
@@ -318,7 +391,6 @@ If a session crashes (context overflow, network issue, etc.), resume with:
 | debates/{agent}-roundN.json | Written by critic; never overwrite |
 | roundN.md | Recompile from debates/roundN.json; safe to overwrite |
 | debate-summary.md | Skip if exists; log "already exists, skipping" |
-| Final artifact | Ask user before overwriting |
 | `state.json` | Always writable; never skip |
 
 ## Files-First Principle (Critical Architecture)
@@ -340,9 +412,9 @@ Never make decisions based on what the orchestrator "remembers". Read state.json
 
 **Rule D — Architect mode always reloads from disk:**
 When switching to Architect Mode, explicitly read:
-- discussions/{session_id}/input.md (original spec)
-- discussions/{session_id}/debates/round1.json through debates/round{N}.json
-- discussions/{session_id}/state.json (risk_register, contradictions)
+- discussions/{name}/input.md (original spec)
+- discussions/{name}/debates/round1.json through debates/round{N}.json
+- discussions/{name}/state.json (risk_register, contradictions)
 
 Build analysis from these files. Do not rely on conversation history that may have been compacted.
 
@@ -354,7 +426,7 @@ At any point in the flow, if the session dies and is resumed, the orchestrator m
 The skill generates two separate files at different points:
 
 **File 1 — Debate Summary (debate-summary.md)**
-- **Location:** Inside `discussions/{session_id}/`
+- **Location:** Inside `discussions/{name}/`
 - **Timing:** Written immediately after all rounds complete (before architect mode)
 - **Content:**
   - Raw outcome of debate
@@ -363,18 +435,6 @@ The skill generates two separate files at different points:
   - What was/wasn't resolved by experts
   - Link to full transcript
 - **No user input required** — written automatically
-
-**File 2 — Final Solution (genre-matched filename)**
-- **Location:** Project root or next to input file
-- **Timing:** Written after human-architect dialogue concludes
-- **Filename:** Genre-matched (TECHNICAL_SPEC.md, VISION.md, REQUIREMENTS.md, ARCHITECTURE.md, or FINAL_PLAN.md)
-- **Content:**
-  - Complete resolution with architect decisions
-  - User input incorporated
-  - All items closed
-  - `## Known Issues` section (deferred/accepted risks)
-  - `## Low-Confidence Risks` section (separate subsection)
-  - `## Debate Summary` section (brief stats + link to discussions folder)
 
 ## Consensus criterion (formal definition)
 
@@ -394,7 +454,7 @@ Gates marked with **[GATE]**. Everything else is automatic.
 - If file path: read file content as spec
 - If topic: use topic text as spec
 - Generate slugified session_id from spec
-- Define SESSION_DIR = "discussions/{session_id}"
+- Define SESSION_DIR = "discussions/{name}"
 - Create SESSION_DIR directory
 - Create SESSION_DIR + "/debates/" directory
 - Write original spec to SESSION_DIR + "/input.md"
@@ -422,14 +482,14 @@ Gates marked with **[GATE]**. Everything else is automatic.
 ### Step 4: Run Round 1 (parallel discovery)
 
 **Pre-launch:**
-- Write current_step: "round_1_in_progress" to discussions/{session_id}/state.json
+- Write current_step: "round_1_in_progress" to discussions/{name}/state.json
 - Write round_responses["1"]: { agent: "pending" for each } to state.json
 - **Context overflow warning:** If `selected_domains.length >= 5`, print:
   ```
   Note: Running {N} agents in parallel at opus level will use significant context.
   If the session stops unexpectedly, resume with:
-    /pre-mortem resume {session_id}
-  All progress is saved continuously to discussions/{session_id}/state.json
+    /pre-mortem resume {name}
+  All progress is saved continuously to discussions/{name}/state.json
   ```
 
 **Agent task instructions (injected into each critic prompt):**
@@ -440,7 +500,7 @@ The orchestrator must inject these instructions at the end of every critic promp
 ## Output Instructions
 
 Write your complete JSON response to exactly this path:
-  discussions/{session_id}/debates/{agent_name}-round1.json
+  discussions/{name}/debates/{agent_name}-round1.json
 
 The file must contain exactly one valid JSON object matching the required schema.
 Do not create any other files.
@@ -456,7 +516,7 @@ After writing the file, return only this minimal JSON to the orchestrator
 **Per-agent completion (orchestrator side):**
 
 When the orchestrator receives the minimal completion signal:
-1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round1.json
+1. Verify file exists at discussions/{name}/debates/{agent_name}-round1.json
 2. Update round_responses["1"][agent] = "completed" in state.json
 3. Write state.json to disk
 4. Do NOT read the full response into orchestrator context
@@ -469,17 +529,17 @@ On failure (status != "done" or file missing):
 **Post-round compilation:**
 
 After all agents complete:
-1. Read all discussions/{session_id}/debates/{agent}-round1.json files
-2. Compile into discussions/{session_id}/debates/round1.json (array)
-3. Write discussions/{session_id}/debates/round1.jsonl (one object per line)
-4. Generate discussions/{session_id}/round1.md from the compiled JSON
+1. Read all discussions/{name}/debates/{agent}-round1.json files
+2. Compile into discussions/{name}/debates/round1.json (array)
+3. Write discussions/{name}/debates/round1.jsonl (one object per line)
+4. Generate discussions/{name}/round1.md from the compiled JSON
 5. Update risk_register and contradictions in state.json from compiled data
 6. **Discard the compiled data from context** — it is on disk, not needed in memory
 
 ### Step 5: Run Round 2 (sequential debate)
 
 **Pre-launch:**
-- Write current_step: "round_2_in_progress" to discussions/{session_id}/state.json
+- Write current_step: "round_2_in_progress" to discussions/{name}/state.json
 - Write round_responses["2"]: { agent: "pending" for each } to state.json
 
 **Agent task instructions (injected into each critic prompt):**
@@ -488,7 +548,7 @@ After all agents complete:
 ## Output Instructions
 
 Write your complete JSON response to exactly this path:
-  discussions/{session_id}/debates/{agent_name}-round2.json
+  discussions/{name}/debates/{agent_name}-round2.json
 
 The file must contain exactly one valid JSON object matching the required schema.
 Do not create any other files.
@@ -505,7 +565,7 @@ After writing the file, return only this minimal JSON to the orchestrator
 **Per-agent completion (orchestrator side):**
 
 When the orchestrator receives the minimal completion signal:
-1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round2.json
+1. Verify file exists at discussions/{name}/debates/{agent_name}-round2.json
 2. Update round_responses["2"][agent] = "completed" in state.json
 3. Write state.json to disk
 4. Do NOT read the full response into orchestrator context
@@ -518,17 +578,17 @@ On failure:
 **Post-round compilation:**
 
 After all agents complete:
-1. Read all discussions/{session_id}/debates/{agent}-round2.json files
-2. Compile into discussions/{session_id}/debates/round2.json (array)
-3. Write discussions/{session_id}/debates/round2.jsonl (one object per line)
-4. Generate discussions/{session_id}/round2.md from the compiled JSON
+1. Read all discussions/{name}/debates/{agent}-round2.json files
+2. Compile into discussions/{name}/debates/round2.json (array)
+3. Write discussions/{name}/debates/round2.jsonl (one object per line)
+4. Generate discussions/{name}/round2.md from the compiled JSON
 5. Update risk_register and contradictions in state.json from compiled data
 6. **Discard the compiled data from context** — it is on disk, not needed in memory
 
 ### Step 6: Run Round 3 (parallel filter)
 
 **Pre-launch:**
-- Write current_step: "round_3_in_progress" to discussions/{session_id}/state.json
+- Write current_step: "round_3_in_progress" to discussions/{name}/state.json
 - Write round_responses["3"]: { agent: "pending" for each } to state.json
 
 **Agent task instructions (injected into each critic prompt):**
@@ -537,7 +597,7 @@ After all agents complete:
 ## Output Instructions
 
 Write your complete JSON response to exactly this path:
-  discussions/{session_id}/debates/{agent_name}-round3.json
+  discussions/{name}/debates/{agent_name}-round3.json
 
 The file must contain exactly one valid JSON object matching the required schema.
 Do not create any other files.
@@ -554,7 +614,7 @@ After writing the file, return only this minimal JSON to the orchestrator
 **Per-agent completion (orchestrator side):**
 
 When the orchestrator receives the minimal completion signal:
-1. Verify file exists at discussions/{session_id}/debates/{agent_name}-round3.json
+1. Verify file exists at discussions/{name}/debates/{agent_name}-round3.json
 2. Update round_responses["3"][agent] = "completed" in state.json
 3. Write state.json to disk
 4. Do NOT read the full response into orchestrator context
@@ -567,48 +627,21 @@ On failure:
 **Post-round compilation:**
 
 After all agents complete:
-1. Read all discussions/{session_id}/debates/{agent}-round3.json files
-2. Compile into discussions/{session_id}/debates/round3.json (array)
-3. Write discussions/{session_id}/debates/round3.jsonl (one object per line)
-4. Generate discussions/{session_id}/round3.md from the compiled JSON
+1. Read all discussions/{name}/debates/{agent}-round3.json files
+2. Compile into discussions/{name}/debates/round3.json (array)
+3. Write discussions/{name}/debates/round3.jsonl (one object per line)
+4. Generate discussions/{name}/round3.md from the compiled JSON
 5. Update risk_register and contradictions in state.json from compiled data
 6. **Discard the compiled data from context** — it is on disk, not needed in memory
 
-### Step 7: Consensus check (automatic)
-- Write `current_step: "post_round3_consensus_check"` to state.json
-- Evaluate consensus criterion programmatically from state.json:
-  - Count High severity risks with status "open"
-  - Check if all blocking_question fields resolved
-  - Check if all contradictions resolved
-- **If consensus reached:** proceed to Step 9
-- **If NOT reached:**
-  - Count unresolved items (N)
-  - **[GATE 4 - conditional]** AskUserQuestion: "Consensus not reached on {N} issues. Run 2 more rounds?"
-    - **Yes:** run up to 2 more rounds (parallel filter semantics, stop early if consensus reached mid-way), then proceed to Step 9
-    - **No:** proceed to Step 9
-
-### Step 8: Extra rounds (if requested)
-- Write `current_step: "extra_rounds_in_progress"` to state.json
-- Run up to 2 more rounds (rounds 4 and 5) with same mechanics as Round 3
-- Each extra round follows the same pattern:
-  - Pre-launch: Write current_step and round_responses to state.json
-  - Inject output path instructions into critic prompts: discussions/{session_id}/debates/{agent_name}-round{N}.json
-  - Critics return minimal completion signals
-  - Orchestrator verifies files, updates state.json
-  - Post-round: Read from debates/{agent}-round{N}.json, compile to debates/round{N}.json and debates/round{N}.jsonl
-  - Generate round{N}.md from compiled JSON
-  - Discard compiled data from context
-- Check consensus after each round
-- Stop early if consensus reached
-
-### Step 9: Write debate summary file
+### Step 7: Write debate summary file
 - Write `current_step: "debate_summary_write"` to state.json
-- Read all round files from discussions/{session_id}/debates/round{N}.json
-- Write debate-summary.md to discussions/{session_id}/debate-summary.md
+- Read all round files from discussions/{name}/debates/round{N}.json
+- Write debate-summary.md to discussions/{name}/debate-summary.md
 - Content: raw debate outcome, all risks by severity/confidence, contradictions, unresolved items, link to transcript
 - **No user input required** — automatic
 
-### Step 10: Switch to Architect Mode
+### Step 8: Switch to Architect Mode
 - Write `current_step: "architect_mode_active"` to state.json
 - Print separator to console:
   ```
@@ -617,11 +650,11 @@ After all agents complete:
   ─────────────────────────────────────────
   ```
 - **Reload context from disk** (Files-First Rule D):
-  - Read discussions/{session_id}/input.md
-  - Read discussions/{session_id}/debates/round1.json through debates/round{N}.json
-  - Read discussions/{session_id}/state.json
+  - Read discussions/{name}/input.md
+  - Read discussions/{name}/debates/round1.json through debates/round{N}.json
+  - Read discussions/{name}/state.json
 
-### Step 11: Architect filter (Pass A and Pass B)
+### Step 9: Architect filter (Pass A and Pass B)
 **Pass A — Verify unanchored risks (needs_verification: true):**
 - For each risk where `needs_verification: true`:
   - Architect reads spec and checks if risk is grounded
@@ -639,7 +672,7 @@ After all agents complete:
 
 **Pass A always executes before Pass B. Risks dismissed in Pass A are excluded from Pass B.**
 
-### Step 12: Architect analysis and open dialogue
+### Step 10: Architect analysis and open dialogue
 - Write `current_step: "human_architect_dialogue"` to state.json
 - Architect forms positions on all unresolved items
 - Architect presents analysis in natural language (not as approval request)
@@ -649,19 +682,151 @@ After all agents complete:
   - Continues until both agree on every item
   - No fixed number of turns, no approve/reject buttons
   - Ends naturally when agreement is reached
+- **Architect creates `discussions/{name}/{name}-temp.md`** with current working document
+- **After each meaningful exchange: overwrite temp file**
+- **Prints each High/Med decision to console:**
+  ```
+  [ARCHITECT] High · sec-r1-002 · No token revocation
+    Decision: MITIGATE
+    Reasoning: Stateless JWT incompatible with immediate revocation;
+               Redis blocklist adds one hop but is standard practice.
+  ```
+- **Finalization gate:**
+  ```
+  Finalize this discussion?
+  [Yes] [Continue discussing]
+  ```
+  Treat as Yes: "finalize", "looks good", "approve", "ship it",
+  "close the discussion", "done", "let's go with this"
 - Architect confirms resolution
 
-### Step 13: Write final solution file
-- Write `current_step: "final_artifact_write"` to state.json
-- Detect appropriate genre (TECHNICAL_SPEC.md, VISION.md, REQUIREMENTS.md, ARCHITECTURE.md, or FINAL_PLAN.md)
-- Write to project root or next to input file
-- Content: complete resolution, architect decisions, Known Issues section, Low-Confidence Risks section, Debate Summary section
+### Step 11: Finalization
 
-### Step 14: Cleanup offer
-- Write `current_step: "done"` to state.json
-- **[GATE 5]** AskUserQuestion: "Delete discussions/{session_id}/ folder?"
-  - Yes: delete folder
-  - No: keep folder
+Execute in exact order. Step 1 failure aborts everything.
+Steps 2, 3, 4 log warnings and continue on failure.
+
+#### Step 1: Create {name}-approved.md
+
+**If input was a file:**
+Path: `{input_file_directory}/{name}-approved.md`
+
+**If input was plain text:**
+Path: `discussions/{name}/{name}-approved.md`
+(User moves this wherever needed. The Review link remains useful after the move.)
+
+**Content structure:**
+```markdown
+# {Document Title}
+
+> This document was reviewed in a pre-mortem session and approved.
+> Reviewed by: {comma-separated list of participating critic domains}
+> Approved by: Chief Architect + User
+> Pre-mortem session: discussions/{name}/
+
+## Summary
+{2-3 sentences: what we are building and why}
+
+## Implementation Plan
+{full technical plan — mirrors and extends the original input structure}
+
+## Known Issues
+{risks deferred or accepted; each: name, decision (DEFER/ACCEPT RISK),
+one-line rationale}
+
+## Low-Confidence Risks
+{risks flagged Low confidence — may apply depending on implementation
+choices not yet specified}
+```
+
+Do NOT include `## Debate Summary` with round statistics.
+That belongs in the ADR only.
+
+**Failure:** Abort all finalization, preserve all session files, inform user.
+
+#### Step 2: Rename original input file
+
+**File input only. Skip for text input.**
+
+Execute only after Step 1 succeeded and file exists on disk.
+
+Rename: `{name}.md` → `{name}_old.md`
+
+Marks original as superseded. User deletes manually if no longer needed.
+
+**Failure:** Log warning, continue.
+
+#### Step 3: Create {name}-adr.md
+
+Path: `discussions/{name}/{name}-adr.md`
+
+Answers "why did we decide this way". Extract from round JSON files and
+`state.json` — key decisions, not debate statistics.
+
+**Content structure:**
+```markdown
+# ADR: {Document Title}
+
+**Date:** {iso date}
+**Status:** Approved
+**Session:** discussions/{name}/
+**Participants:** {list of critic domains}
+
+## Context
+{1 paragraph: what problem we were solving and what the input proposed}
+
+## Key Decisions
+
+### {Decision title}
+**Decision:** {what was decided}
+**Alternatives considered:** {what else was on the table}
+**Reason:** {why this option was chosen}
+
+## Accepted Risks
+| Risk | Reason accepted | Trade-off |
+|------|-----------------|-----------|
+
+## Rejected Approaches
+{things explicitly ruled out and why}
+
+## Open Items
+{anything deferred, with rationale}
+```
+
+Data sources: `state.json` risk_register, contradictions, user_decisions,
+architect Step 10 console output.
+
+**Failure:** Log warning, continue to Step 4.
+
+#### Step 4: Clean up session folder
+
+Delete from `discussions/{name}/` everything except `{name}-adr.md`:
+- `debates/` and all contents
+- `round*.md`, `round*.json`, `round*.jsonl`
+- `input.md`, `state.json`, `debate-summary.md`
+- `{name}-temp.md`
+
+After cleanup: `discussions/{name}/` contains exactly `{name}-adr.md`.
+
+**Failure:** Log warning, inform user of leftover files.
+
+**Final filesystem state:**
+
+File input:
+```
+{input_directory}/
+  {name}_old.md          ← original, superseded
+  {name}-approved.md     ← final approved document
+
+discussions/{name}/
+  {name}-adr.md          ← sole remaining file
+```
+
+Text input:
+```
+discussions/{name}/
+  {name}-approved.md     ← final document (user moves this where needed)
+  {name}-adr.md          ← sole remaining file after cleanup
+```
 
 ## Round semantics
 
@@ -682,20 +847,3 @@ After all agents complete:
 - Focus ONLY on High/Med severity risks
 - Goal: validate solutions, assess tradeoffs
 - Output: actionable risk mitigation strategies
-
-**Extra rounds (if needed) — Parallel filter:**
-- Same semantics as Round 3
-- Only run if consensus not reached after Round 3
-
-## Output artifact genre-matching
-
-Detect appropriate output file based on input characteristics (priority order, first match wins):
-
-1. **REQUIREMENTS.md** — if input contains user stories, acceptance criteria, "As a user", "Given/When/Then"
-2. **ARCHITECTURE.md** — if input contains architecture diagrams, "Component", "Service", "Layer", "Module"
-3. **TECHNICAL_SPEC.md** — if input contains API contracts, "Endpoint", "Schema", "Interface", "Protocol"
-4. **VISION.md** — if input contains problem statement, "Why", "Goal", "Mission", "Problem"
-5. **FINAL_PLAN.md** — default fallback
-
-## Extra rounds
-Default: extra rounds are **parallel filter** rounds (Round 3 semantics) unless user explicitly requests sequential.
