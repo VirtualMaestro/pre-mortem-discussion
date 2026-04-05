@@ -347,6 +347,7 @@ The `state.json` file is the single source of truth for session state. It must i
 - `"debate_summary_write"` — Writing debate-summary.md
 - `"architect_mode_active"` — Architect analyzing debate
 - `"human_architect_dialogue"` — Open conversation with user
+- `"generating_final_output"` — Writing approved + adr + open-questions files, then cleanup
 - `"done"` — Session complete
 
 **round_responses structure:**
@@ -380,7 +381,8 @@ If a session crashes (context overflow, network issue, etc.), resume with:
 | `debate_summary_write` | Write debate summary (skip if file exists) |
 | `architect_mode_active` | Print transition, reload context from files, start analysis |
 | `human_architect_dialogue` | Reload from debate summary, continue conversation |
-| `done` | Tell user session complete, show file locations |
+| `generating_final_output` | Re-run Steps 1-5 of Step 11, skip files that already exist |
+| `done` | Session already complete. Show file locations. |
 
 **Idempotency rules:**
 
@@ -392,6 +394,9 @@ If a session crashes (context overflow, network issue, etc.), resume with:
 | roundN.md | Recompile from debates/roundN.json; safe to overwrite |
 | debate-summary.md | Skip if exists; log "already exists, skipping" |
 | `state.json` | Always writable; never skip |
+| {name}-approved.md | Skip if exists; overwrite if user resolved open questions |
+| {name}-adr.md | Skip if exists; append if user resolved open questions |
+| {name}-open-questions.md | Skip if exists; delete once all questions answered |
 
 ## Files-First Principle (Critical Architecture)
 
@@ -421,20 +426,20 @@ Build analysis from these files. Do not rely on conversation history that may ha
 **Rule E — Resume is always possible:**
 At any point in the flow, if the session dies and is resumed, the orchestrator must be able to reconstruct full working state from disk alone. If this is not possible at any step, that step is not correctly implemented.
 
-## Two output files
+## Output files
 
-The skill generates two separate files at different points:
+The skill generates three final artifacts at Step 11 (Finalization). They are
+intermediate files that are consumed during the session and deleted at cleanup:
 
-**File 1 — Debate Summary (debate-summary.md)**
-- **Location:** Inside `discussions/{name}/`
-- **Timing:** Written immediately after all rounds complete (before architect mode)
-- **Content:**
-  - Raw outcome of debate
-  - All risks by severity and confidence
-  - Contradictions noted
-  - What was/wasn't resolved by experts
-  - Link to full transcript
-- **No user input required** — written automatically
+**Intermediate (deleted during cleanup):**
+- `debate-summary.md` — Written after all rounds complete (before architect mode).
+  Raw debate outcome, risks by severity/confidence, contradictions, transcript link.
+
+**Final artifacts (kept after cleanup):**
+- `{name}-approved.md` — Approved document with implementation plan. Path depends on input type.
+- `{name}-adr.md` — Decision record, always in `discussions/{name}/`.
+- `{name}-open-questions.md` — Conditional. Only created if unresolved questions remain.
+  Always in `discussions/{name}/`.
 
 ## Consensus criterion (formal definition)
 
@@ -691,19 +696,21 @@ After all agents complete:
     Reasoning: Stateless JWT incompatible with immediate revocation;
                Redis blocklist adds one hop but is standard practice.
   ```
-- **Finalization gate:**
-  ```
-  Finalize this discussion?
-  [Yes] [Continue discussing]
-  ```
-  Treat as Yes: "finalize", "looks good", "approve", "ship it",
-  "close the discussion", "done", "let's go with this"
-- Architect confirms resolution
+- **Auto-close behavior:** After the architect presents the analysis, open questions,
+  and console output for each High/Med decision, the orchestrator immediately proceeds
+  to Step 11 (Finalization). **No user gate required.** The debate is considered closed
+  — further rounds produce no new signal.
+- The user can continue the discussion in the same chat to resolve open questions.
+  If open questions are resolved, the agent updates the `-approved.md` and `-adr.md`
+  files accordingly. The user may also stop the discussion and handle open questions
+  independently.
 
 ### Step 11: Finalization
 
 Execute in exact order. Step 1 failure aborts everything.
-Steps 2, 3, 4 log warnings and continue on failure.
+Steps 2, 3, 4, 5 log warnings and continue on failure.
+
+Write `current_step: "generating_final_output"` to state.json before Step 1 begins.
 
 #### Step 1: Create {name}-approved.md
 
@@ -718,16 +725,22 @@ Path: `discussions/{name}/{name}-approved.md`
 ```markdown
 # {Document Title}
 
-> This document was reviewed in a pre-mortem session and approved.
+> This document was reviewed in a pre-mortem session and the approved sections are final.
+> Open questions remain — see `{name}-open-questions.md` in the session folder.
 > Reviewed by: {comma-separated list of participating critic domains}
-> Approved by: Chief Architect + User
 > Pre-mortem session: discussions/{name}/
 
 ## Summary
 {2-3 sentences: what we are building and why}
 
-## Implementation Plan
-{full technical plan — mirrors and extends the original input structure}
+## Approved Implementation Plan
+{full technical plan — mirrors and extends the original input structure.
+ Include all resolved decisions with spec rule drafts from Round 3.}
+
+## Open Questions
+> The following decisions require user input.
+{List each open question with ID, title, and a one-line description of the decision needed.
+ Reference `{name}-open-questions.md` for full details.}
 
 ## Known Issues
 {risks deferred or accepted; each: name, decision (DEFER/ACCEPT RISK),
@@ -767,7 +780,7 @@ Answers "why did we decide this way". Extract from round JSON files and
 # ADR: {Document Title}
 
 **Date:** {iso date}
-**Status:** Approved
+**Status:** Approved (with open questions)
 **Session:** discussions/{name}/
 **Participants:** {list of critic domains}
 
@@ -789,7 +802,7 @@ Answers "why did we decide this way". Extract from round JSON files and
 {things explicitly ruled out and why}
 
 ## Open Items
-{anything deferred, with rationale}
+{anything deferred, with rationale. Reference `{name}-open-questions.md` if file exists.}
 ```
 
 Data sources: `state.json` risk_register, contradictions, user_decisions,
@@ -797,15 +810,65 @@ architect Step 10 console output.
 
 **Failure:** Log warning, continue to Step 4.
 
-#### Step 4: Clean up session folder
+#### Step 4: Create {name}-open-questions.md (conditional)
 
-Delete from `discussions/{name}/` everything except `{name}-adr.md`:
+Path: `discussions/{name}/{name}-open-questions.md`
+
+**Only create this file if open questions remain.** Open questions include:
+- Any risk with `recommendation: "DEFER"` in Round 3
+- Any unresolved High/Med risk from the architect analysis
+- Any `blocking_question` not yet answered by the user
+- Any structural decision the architect flagged as needing user input
+
+If no open questions exist, skip this step entirely.
+
+**Content structure:**
+```markdown
+# Open Questions — {Document Title}
+
+> These decisions were not resolved during the pre-mortem session.
+> The user can continue the discussion in this chat, or handle them independently.
+> The `{name}-approved.md` and `{name}-adr.md` files reflect the current state —
+> decisions here will update those files when resolved.
+
+## Q1: {Question Title}
+**Related risks:** {risk IDs}
+**Decision needed:** {one-line description of what the user must decide}
+**Context:** {background from the debate — what experts said, what the architect recommended}
+**Options:** {if options were discussed, list them}
+**Recommended:** {architect's recommendation if one was given}
+**Status:** UNANSWERED
+
+## Q2: {Question Title}
+...
+```
+
+**Post-creation behavior:** After the open-questions file is written, the user may
+continue the discussion in the same chat to resolve questions. When a question is
+resolved:
+1. The agent updates the `{name}-open-questions.md` file — change status from
+   `UNANSWERED` to `RESOLVED` and add the decision
+2. The agent updates the `{name}-approved.md` file — add the decision to the
+   implementation plan and remove the question from the Open Questions section
+3. The agent updates the `{name}-adr.md` file — add a new Key Decision entry
+4. When all questions are answered, delete the `{name}-open-questions.md` file
+
+**Failure:** Log warning, continue to Step 5.
+
+#### Step 5: Clean up session folder
+
+Delete from `discussions/{name}/`:
 - `debates/` and all contents
 - `round*.md`, `round*.json`, `round*.jsonl`
 - `input.md`, `state.json`, `debate-summary.md`
 - `{name}-temp.md`
 
-After cleanup: `discussions/{name}/` contains exactly `{name}-adr.md`.
+**Keep:**
+- `{name}-adr.md`
+- `{name}-open-questions.md` (if exists)
+- `{name}.md` or `{name}_old.md` if user wants to keep reference
+
+After cleanup: `discussions/{name}/` contains `{name}-adr.md` and optionally `{name}-open-questions.md`.
 
 **Failure:** Log warning, inform user of leftover files.
 
@@ -815,17 +878,19 @@ File input:
 ```
 {input_directory}/
   {name}_old.md          ← original, superseded
-  {name}-approved.md     ← final approved document
+  {name}-approved.md     ← final approved document with resolved decisions
 
 discussions/{name}/
-  {name}-adr.md          ← sole remaining file
+  {name}-adr.md          ← decision record
+  {name}-open-questions.md  ← (if unresolved questions remain)
 ```
 
 Text input:
 ```
 discussions/{name}/
   {name}-approved.md     ← final document (user moves this where needed)
-  {name}-adr.md          ← sole remaining file after cleanup
+  {name}-adr.md          ← decision record
+  {name}-open-questions.md  ← (if unresolved questions remain)
 ```
 
 ## Round semantics
