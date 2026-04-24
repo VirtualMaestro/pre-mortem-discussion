@@ -1,4 +1,10 @@
-# /pre-mortem — Multi-Agent Pre-Mortem (Spec v7.0)
+---
+name: pre-mortem
+description: Orchestrates a structured multi-agent pre-mortem with minimal user gates.
+disable-model-invocation: true
+---
+
+# /pre-mortem — Multi-Agent Pre-Mortem (Spec v1.5)
 
 This skill orchestrates a structured multi-agent pre-mortem with minimal user gates.
 Scaffolded by `npx pre-mortem-discussion`.

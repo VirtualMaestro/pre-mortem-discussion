@@ -1,6 +1,8 @@
 # pre-mortem-discussion
 
-Scaffold Claude Code **pre-mortem discussion** skill into the project you run it from.
+Scaffold the **pre-mortem discussion** skill into the project you run it from.
+
+Supports Claude Code, Codex, and Antigravity.
 
 ## Install / run
 
@@ -8,14 +10,31 @@ Scaffold Claude Code **pre-mortem discussion** skill into the project you run it
 npx pre-mortem-discussion
 ```
 
+An interactive prompt asks which AI agents to install for. Use `↑`/`↓` to move, `Space` to toggle, `Enter` to confirm. Multiple agents can be selected.
+
+```
+Install for which AI agents? (Space = toggle, Enter = confirm)
+> [x] Claude Code
+  [ ] Codex
+  [ ] Antigravity
+```
+
 ## What it writes
 
-Scaffolds the `/pre-mortem` skill into the target project:
+Files are placed under the agent-specific skills folder:
 
-- `.claude/skills/pre-mortem/SKILL.md`
-- `.claude/skills/pre-mortem/agent-template.md`
-- `.claude/skills/pre-mortem/domains.md`
-- `.claude/skills/pre-mortem/.scaffold-meta.json`
+| Agent | Path |
+|-------|------|
+| Claude Code | `.claude/skills/pre-mortem/` |
+| Codex | `.agent/skills/pre-mortem/` |
+| Antigravity | `.agent/skills/pre-mortem/` |
+
+Files written per agent:
+
+- `SKILL.md`
+- `agent-template.md`
+- `domains.md`
+- `.scaffold-meta.json`
 
 ## Update policy (non-destructive)
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { scaffoldPreMortemSkill } from "./index";
+import { multiSelect } from "./prompt";
+import { AI_PROVIDERS, skillTargetDir, type AiProvider } from "./paths";
 
 function printHelp() {
-  // intentionally minimal; CLI is scaffold-only
   process.stdout.write(
     [
       "pre-mortem-discussion: scaffold Claude Code pre-mortem skill\n",
@@ -27,15 +28,31 @@ async function main() {
   const cwd = process.cwd();
   const skillName = "pre-mortem";
 
-  const result = await scaffoldPreMortemSkill({ cwd, skillName });
+  const selected = await multiSelect(
+    "Install for which AI agents? (Space = toggle, Enter = confirm)\n",
+    AI_PROVIDERS
+  );
 
-  // concise, conflict-forward output
-  for (const e of result.entries) {
-    const suffix = e.detail ? ` (${e.detail})` : "";
-    process.stdout.write(`${e.action}\t${e.relativePath}${suffix}\n`);
+  if (selected.length === 0) {
+    process.stdout.write("No agents selected. Exiting.\n");
+    return;
   }
 
-  if (result.hadConflicts) process.exitCode = 2;
+  for (const provider of selected as AiProvider[]) {
+    const targetDir = skillTargetDir(cwd, provider, skillName);
+    const providerLabel = AI_PROVIDERS.find((p) => p.value === provider)!.label;
+
+    process.stdout.write(`\n[${providerLabel}]\n`);
+
+    const result = await scaffoldPreMortemSkill({ cwd, skillName, targetDir });
+
+    for (const e of result.entries) {
+      const suffix = e.detail ? ` (${e.detail})` : "";
+      process.stdout.write(`${e.action}\t${e.relativePath}${suffix}\n`);
+    }
+
+    if (result.hadConflicts) process.exitCode = 2;
+  }
 }
 
 main().catch((err) => {

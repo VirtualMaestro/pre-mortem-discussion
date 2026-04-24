@@ -19,7 +19,7 @@ Return exactly **one** JSON object.
 - No markdown.
 - No trailing commentary.
 
-# JSON schema (Spec v4.2 — STRICT)
+# JSON schema (Spec v1.5 — STRICT)
 Top-level object (all required):
 - `agent`: string (your agent name; must equal `{agent-name}`)
 - `round`: integer (current round number)

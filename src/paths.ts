@@ -1,8 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export function skillTargetDir(projectRoot: string, skillName: string): string {
-  return path.join(projectRoot, ".claude", "skills", skillName);
+export type AiProvider = "claude-code" | "codex" | "antigravity";
+
+export const AI_PROVIDERS: { label: string; value: AiProvider }[] = [
+  { label: "Claude Code", value: "claude-code" },
+  { label: "Codex", value: "codex" },
+  { label: "Antigravity", value: "antigravity" },
+];
+
+export function skillTargetDir(projectRoot: string, provider: AiProvider, skillName: string): string {
+  const base = provider === "claude-code" ? ".claude" : ".agent";
+  return path.join(projectRoot, base, "skills", skillName);
 }
 
 export type AssetTemplate = { fileName: string; content: string };
