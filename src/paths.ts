@@ -9,9 +9,14 @@ export const AI_PROVIDERS: { label: string; value: AiProvider }[] = [
   { label: "Antigravity", value: "antigravity" },
 ];
 
+const PROVIDER_BASE: Record<AiProvider, string> = {
+  "claude-code": ".claude",
+  "codex": ".codex",
+  "antigravity": ".agent",
+};
+
 export function skillTargetDir(projectRoot: string, provider: AiProvider, skillName: string): string {
-  const base = provider === "claude-code" ? ".claude" : ".agent";
-  return path.join(projectRoot, base, "skills", skillName);
+  return path.join(projectRoot, PROVIDER_BASE[provider], "skills", skillName);
 }
 
 export type AssetTemplate = { fileName: string; content: string };

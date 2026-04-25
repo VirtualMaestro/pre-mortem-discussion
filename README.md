@@ -26,7 +26,7 @@ Files are placed under the agent-specific skills folder:
 | Agent | Path |
 |-------|------|
 | Claude Code | `.claude/skills/pre-mortem/` |
-| Codex | `.agent/skills/pre-mortem/` |
+| Codex | `.codex/skills/pre-mortem/` |
 | Antigravity | `.agent/skills/pre-mortem/` |
 
 Files written per agent:
