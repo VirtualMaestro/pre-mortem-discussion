@@ -29,7 +29,7 @@ async function main() {
   const skillName = "pre-mortem";
 
   const selected = await multiSelect(
-    "Install for which AI agents? (Space = toggle, Enter = confirm)\n",
+    "Install for which AI agents? (Space = toggle, Enter = confirm)",
     AI_PROVIDERS
   );
 

@@ -7,7 +7,7 @@ function render(message: string, choices: Choice[], cursor: number, selected: Se
   if (!isFirst) {
     process.stdout.write(`\x1b[${choices.length + 1}A`);
   }
-  process.stdout.write(`${message}\n`);
+  process.stdout.write(`\x1b[2K${message}\n`);
   for (let i = 0; i < choices.length; i++) {
     const mark = selected.has(i) ? "[x]" : "[ ]";
     const arrow = i === cursor ? ">" : " ";
